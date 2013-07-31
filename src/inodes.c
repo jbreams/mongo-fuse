@@ -56,8 +56,7 @@ int get_inode(const char * path, struct inode * out, int getdata) {
     bson query, doc, fields;
     bson_iterator i;
     bson_type bt;
-    mongo_cursor curs;
-    int res, c;
+    int res;
     const char * key;
 
     bson_init(&query);

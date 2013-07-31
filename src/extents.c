@@ -51,8 +51,8 @@ static int extent_cmp(const void * ra, const void * rb) {
 }
 
 int resolve_extent(struct inode * e, off_t start,
-    off_t end, struct extent ** realout) {
-    bson query, doc;
+    off_t end, struct extent ** realout, int * countout) {
+    bson query;
     int res, x, count, y;
     struct extent * out = NULL;
     mongo_cursor curs;
@@ -60,18 +60,25 @@ int resolve_extent(struct inode * e, off_t start,
     bson_type bt;
     const char * key;
 
+
     start = (start/EXTENT_SIZE)*EXTENT_SIZE;
-    end = end % EXTENT_SIZE;
-    end = ((end / EXTENT_SIZE) + (end?1:0)) * EXTENT_SIZE;
-    count = end - start / EXTENT_SIZE;
 
     bson_init(&query);
     bson_append_start_object(&query, "$query");
     bson_append_oid(&query, "inode", &e->oid);
-    bson_append_start_object(&query, "start");
-    bson_append_long(&query, "$gte", start);
-    bson_append_long(&query, "$lte", end);
-    bson_append_finish_object(&query);
+    if(end - start < EXTENT_SIZE) {
+        bson_append_long(&query, "start", start);
+        count = 1;
+    } else {
+        x = end % EXTENT_SIZE;
+        end = ((end / EXTENT_SIZE) + (x?1:0)) * EXTENT_SIZE;
+        count = end - start / EXTENT_SIZE;
+
+        bson_append_start_object(&query, "start");
+        bson_append_long(&query, "$gte", start);
+        bson_append_long(&query, "$lte", end);
+        bson_append_finish_object(&query);
+    }
     bson_append_finish_object(&query);
     bson_append_start_object(&query, "$orderby");
     bson_append_int(&query, "start", 1);
@@ -87,6 +94,7 @@ int resolve_extent(struct inode * e, off_t start,
     out = malloc(sizeof(struct extent) * count);
     memset(out, 0, sizeof(struct extent) * count);
     *realout = out;
+    *countout = count;
 
     x = 0;
     while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
@@ -124,9 +132,11 @@ int resolve_extent(struct inode * e, off_t start,
         if(bsearch(&s, out, x, sizeof(struct extent), extent_cmp) != NULL)
             continue;
 
-        out[x++].start = curoff;
-        bson_oid_gen(&out[x].oid);
+        out[x].start = curoff;
+        bson_oid_gen(&out[x++].oid);
     }
+
+    qsort(out, count, sizeof(struct extent), extent_cmp);
 
     return 0;
 }

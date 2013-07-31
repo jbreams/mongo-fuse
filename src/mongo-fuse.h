@@ -1,5 +1,5 @@
 
-#define EXTENT_SIZE 8388608
+#define EXTENT_SIZE 262144
 #define FUSE_USE_VERSION 26
 
 struct extent {
@@ -34,5 +34,5 @@ int commit_inode(struct inode * e);
 
 int commit_exent(struct inode * ent, struct extent *e);
 int resolve_extent(struct inode * e, off_t start,
-    off_t end, struct extent ** realout);
+    off_t end, struct extent ** realout, int * countout);
 

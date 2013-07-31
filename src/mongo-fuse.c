@@ -71,6 +71,7 @@ static int mongo_write(const char *path, const char *buf, size_t size,
     struct inode e;
     off_t * offs;
     int res, offcount;
+    size_t totalsize = size + offset;
 
     if(strcmp(path, "/") != 0)
         return -ENOENT;
@@ -84,6 +85,11 @@ static int mongo_write(const char *path, const char *buf, size_t size,
 	if(strcmp(path, "/") != 0)
 		return -ENOENT;
 
+    if(data) {
+        if(totalsize > e.size) {
+            if()
+        }
+    }
 
 	return size;
 }
@@ -104,8 +110,9 @@ static int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     struct inode e;
     off_t base;
     int res, count, x;
-    struct extents;
-    size_t y, todo;
+    struct extent * o;
+    char * block = buf;
+    size_t y;
 
     if(strcmp(path, "/") != 0)
         return -ENOENT;
@@ -128,33 +135,27 @@ static int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         return y;
     }
 
-    res = resolve_extent(&e, offset, offset + size, &o);
+    res = resolve_extent(&e, offset, offset + size, &o, &count);
     free_inode(&e);
     if(res != 0)
         return res;
 
-    if(offcount == 1) {
-        offset %= EXTENT_SIZE;
-        memcpy(buf, o->data + offset, size);
+    y = offset % EXTENT_SIZE;
+    memcpy(block, o->data + y, EXTENT_SIZE - y);
+    block += y;
+
+    if(count == 1) {
         free(o);
         return size;
     }
 
-    os = (struct extent**)o;
-
-    for(x = 0; x < offcount; x++) {
-        if(x == 0) {
-            y = OFFSET % EXTENT_SIZE;
-            memcpy(buf, os[x]->data + (y), EXTENT_SIZE - y);
-            size -= EXTENT_SIZE - y;
-        } else if(x == offcount - 1) {
-            memcpy(buf + done, os[x]->data, size - done);
-        } else {
-            memcpy(buf + done, os[x]->data, EXTENT_SIZE);
-            done += EXTENT_SIZE;
-        }
+    for(x = 1; x < count - 1; x++) {
+        memcpy(block, o[x].data, EXTENT_SIZE);
+        block += EXTENT_SIZE;
     }
 
+    memcpy(block, o[count - 1].data, size - (block - buf));
+    free(o);
     return size;
 }
 
