@@ -23,7 +23,6 @@ char * blocks_name = "test.blocks";
 char * inodes_name = "test.inodes";
 mongo conn;
 
-
 static int mongo_getattr(const char *path, struct stat *stbuf) {
     int res = 0;
     struct inode e;
@@ -51,7 +50,6 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
     return res;
 }
 
-
 static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                          off_t offset, struct fuse_file_info *fi) {
     (void) offset;
@@ -70,9 +68,18 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 static int mongo_write(const char *path, const char *buf, size_t size,
 		      off_t offset, struct fuse_file_info *fi)
 {
-    int res;
-    int size;
-    struct entry e;
+    struct inode e;
+    off_t * offs;
+    int res, offcount;
+
+    if(strcmp(path, "/") != 0)
+        return -ENOENT;
+
+    if((res = get_inode(path, &e, 1)) != 0)
+        return res;
+
+    if(e.mode & S_IFDIR)
+        return -EISDIR;
 
 	if(strcmp(path, "/") != 0)
 		return -ENOENT;
@@ -94,48 +101,59 @@ static int mongo_open(const char *path, struct fuse_file_info *fi)
 
 static int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                       struct fuse_file_info *fi) {
-    size_t len;
-    (void) fi;
+    struct inode e;
+    off_t base;
+    int res, count, x;
+    struct extents;
+    size_t y, todo;
 
-    if(strcmp(path, mongo_path) != 0)
+    if(strcmp(path, "/") != 0)
         return -ENOENT;
 
-    mongo conn;
-    mongo_init( &conn );
-    int res = mongo_client( &conn, "127.0.0.1", 27017 );
-    if ( res != MONGO_OK ) {
-        fprintf( stderr, "connection to mongo failed\n" );
-        return -ENOENT;
+    if((res = get_inode(path, &e, 1)) != 0)
+        return res;
+
+    if(e.mode & S_IFDIR)
+        return -EISDIR;
+
+    if(offset > e.size)
+        return 0;
+
+    if(e.data) {
+        y = size;
+        if(y + offset > e.size)
+            y = e.size - offset;
+        memcpy(buf, e.data + offset, y);
+        free_inode(&e);
+        return y;
     }
 
-    bson doc;
-    res = mongo_find_one( &conn, "test.blocks", bson_shared_empty(), bson_shared_empty(), &doc );
-    if ( res != MONGO_OK ) {
-        fprintf( stderr, "find one failed\n" );
-        return -ENOENT;
+    res = resolve_extent(&e, offset, offset + size, &o);
+    free_inode(&e);
+    if(res != 0)
+        return res;
+
+    if(offcount == 1) {
+        offset %= EXTENT_SIZE;
+        memcpy(buf, o->data + offset, size);
+        free(o);
+        return size;
     }
 
-    bson_print( &doc );
+    os = (struct extent**)o;
 
-    bson_iterator it;
-    bson_iterator_init( &it, &doc );
-    if ( bson_find( &it, &doc, "data" ) != BSON_STRING ) {
-        fprintf( stderr, "no data field\n" );
-        return -ENOENT;
+    for(x = 0; x < offcount; x++) {
+        if(x == 0) {
+            y = OFFSET % EXTENT_SIZE;
+            memcpy(buf, os[x]->data + (y), EXTENT_SIZE - y);
+            size -= EXTENT_SIZE - y;
+        } else if(x == offcount - 1) {
+            memcpy(buf + done, os[x]->data, size - done);
+        } else {
+            memcpy(buf + done, os[x]->data, EXTENT_SIZE);
+            done += EXTENT_SIZE;
+        }
     }
-
-    const char* data = bson_iterator_string( &it );
-
-    len = strlen(data);
-    if (offset < len) {
-        if (offset + size > len)
-            size = len - offset;
-        memcpy(buf, data + offset, size);
-    }
-    else
-        size = 0;
-
-    mongo_destroy( &conn );
 
     return size;
 }
