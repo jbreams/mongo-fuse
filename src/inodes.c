@@ -18,8 +18,6 @@ int commit_inode(struct inode * e) {
     struct dirent * cde = e->dirents;
     int res;
 
-    bson_numstr(istr, 0);
-
     bson_init(&cond);
     bson_append_oid(&cond, "_id", &e->oid);
     bson_finish(&cond);
@@ -27,11 +25,14 @@ int commit_inode(struct inode * e) {
     bson_init(&doc);
     bson_append_oid(&doc, "_id", &e->oid);
     bson_append_start_array(&doc, "dirents");
+    res = 0;
     while(cde) {
+        bson_numstr(istr, res++);
+        printf("Adding %s\n", cde->path);
         bson_append_string(&doc, istr, cde->path);
-        bson_incnumstr(istr);
         cde = cde->next;
     }
+    bson_append_finish_array(&doc);
 
     bson_append_int(&doc, "mode", e->mode);
     bson_append_long(&doc, "owner", e->owner);
@@ -39,9 +40,10 @@ int commit_inode(struct inode * e) {
     bson_append_long(&doc, "size", e->size);
     bson_append_time_t(&doc, "created", e->created);
     bson_append_time_t(&doc, "modified", e->modified);
-    if(e->data)
+    if(e->data && e->datalen > 0)
         bson_append_binary(&doc, "data", 0, e->data, e->size);
 
+    bson_finish(&doc);
     res = mongo_update(&conn, inodes_name, &cond, &doc, MONGO_UPDATE_UPSERT, NULL);
     bson_destroy(&cond);
     bson_destroy(&doc);
@@ -81,6 +83,10 @@ int get_inode(const char * path, struct inode * out, int getdata) {
     memset(out, 0, sizeof(struct inode));
     bson_destroy(&query);
     bson_iterator_init(&i, &doc);
+    if(getdata) {
+        out->data = malloc(EXTENT_SIZE);
+        memset(out->data, 0, EXTENT_SIZE);
+    }
 
     while((bt = bson_iterator_next(&i)) > 0) {
         key = bson_iterator_key(&i);
@@ -91,17 +97,21 @@ int get_inode(const char * path, struct inode * out, int getdata) {
         else if(strcmp(key, "owner") == 0)
             out->owner = bson_iterator_long(&i);
         else if(strcmp(key, "group") == 0)
-            out->owner = bson_iterator_long(&i);
+            out->group = bson_iterator_long(&i);
         else if(strcmp(key, "size") == 0)
-            out->owner = bson_iterator_long(&i);
+            out->size = bson_iterator_long(&i);
         else if(strcmp(key, "created") == 0)
             out->created = bson_iterator_time_t(&i);
         else if(strcmp(key, "modified") == 0)
             out->modified = bson_iterator_time_t(&i);
-         else if(strcmp(key, "data") == 0) {
-            out->data = malloc(EXTENT_SIZE);
-            out->datalen = bson_iterator_bin_len(&i);
-            memcpy(out->data, bson_iterator_bin_data(&i), out->datalen);
+        else if(strcmp(key, "data") == 0 && getdata) {
+            if(bt == BSON_STRING) {
+                out->datalen = bson_iterator_string_len(&i);
+                strcpy(out->data, bson_iterator_string(&i));
+            } else if(bt == BSON_BINDATA) {
+                out->datalen = bson_iterator_bin_len(&i);
+                memcpy(out->data, bson_iterator_bin_data(&i), out->datalen);
+            }
         }
         else if(strcmp(key, "dirents")) {
             bson_iterator sub;

@@ -19,7 +19,6 @@
 #include <sys/stat.h>
 #include "mongo-fuse.h"
 
-static const char *mongo_path = "/hello";
 char * blocks_name = "test.blocks";
 char * inodes_name = "test.inodes";
 mongo conn;
@@ -35,11 +34,15 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
         return res;
     }
 
+    printf("I'm in getattr for %s \n", path);
     res = get_inode(path, &e, 0);
     if(res != 0)
         return res;
 
+    stbuf->st_nlink = e.direntcount;
     stbuf->st_mode = e.mode;
+    if(stbuf->st_mode & S_IFDIR)
+        stbuf->st_nlink++;
     stbuf->st_uid = e.owner;
     stbuf->st_gid = e.group;
     stbuf->st_size = e.size;
@@ -65,7 +68,8 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
 
-    sprintf(regexp, "^%s/[^/]+", path);
+    sprintf(regexp, "^%s/[^/]+", path + 1);
+    printf("%s\n", regexp);
     bson_init(&query);
     bson_append_regex(&query, "dirents", regexp, "");
     bson_finish(&query);
@@ -111,7 +115,7 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
             }
         }
 
-        filler(buf, curpath + pathlen + 1, &stbuf, 0);
+        filler(buf, curpath + pathlen, &stbuf, 0);
     }
     bson_destroy(&query);
     bson_destroy(&fields);
@@ -149,6 +153,7 @@ static int mongo_write(const char *path, const char *buf, size_t size,
         memcpy(e.data + offset, block, tocopy);
         offset += tocopy;
         block += tocopy;
+        e.datalen = tocopy + offset;
     }
 
     if(block - buf == size) {
@@ -199,13 +204,52 @@ advance:
 
 static int mongo_open(const char *path, struct fuse_file_info *fi)
 {
-    if (strcmp(path, mongo_path) != 0)
-        return -ENOENT;
+    struct inode e;
+    int res;
 
-    if ((fi->flags & 3) != O_RDONLY)
-        return -EACCES;
+    printf("I'm in open\n");
+    res = get_inode(path, &e, 0);
+    if(res == 0)
+        free_inode(&e);
+    return res;
+}
 
-    return 0;
+static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * fi) {
+    struct inode e;
+    int res;
+    int pathlen = strlen(path);
+    const struct fuse_context * fcx = fuse_get_context();
+
+
+    res = get_inode(path, &e, 0);
+    printf("I'm in create %d\n", res);
+    if(res == 0) {
+        free_inode(&e);
+        fprintf(stderr, "Exiting because it already exists\n");
+        return 0;
+    }
+    else if(res != -ENOENT) {
+        fprintf(stderr, "Exiting create with error %d\n", res);
+        return res;
+    }
+
+    bson_oid_gen(&e.oid);
+    e.dirents = malloc(sizeof(struct dirent) + pathlen);
+    strcpy(e.dirents->path, path);
+    e.dirents->next = NULL;
+    e.direntcount = 1;
+
+    e.mode = mode;
+    e.owner = fcx->uid;
+    e.group = fcx->gid;
+    e.size = 0;
+    e.created = time(NULL);
+    e.modified = time(NULL);
+    e.data = NULL;
+
+    res = commit_inode(&e);
+    free_inode(&e);
+    return res;
 }
 
 static int mongo_read(const char *path, char *buf, size_t size, off_t offset,
@@ -268,15 +312,69 @@ advance:
     return size;
 }
 
+static int do_trunc(struct inode * e, off_t off) {
+    bson cond;
+    int res;
+
+    if(e->mode & S_IFDIR)
+        return -EISDIR;
+
+    if(off > e->size) {
+        e->size = off;
+        return commit_inode(e);
+    }
+
+    bson_init(&cond);
+    bson_append_oid(&cond, "inode", &e->oid);
+
+    if(off <= EXTENT_SIZE) {
+        e->size = off;
+        e->datalen = off;
+    } else {
+        size_t start = off / EXTENT_SIZE;
+        if(off % EXTENT_SIZE != 0)
+            start += EXTENT_SIZE;
+        bson_append_start_object(&cond, "start");
+        bson_append_long(&cond, "$gt", start);
+        bson_append_finish_object(&cond);
+    }
+    bson_finish(&cond);
+    res = mongo_remove(&conn, blocks_name, &cond, NULL);
+    bson_destroy(&cond);
+    if(res != MONGO_OK) {
+        fprintf(stderr, "Error truncating blocks\n");
+        return -EIO;
+    }
+
+    return commit_inode(e);
+}
+
+static int mongo_truncate(const char * path, off_t off) {
+    struct inode e;
+    int res;
+
+    if((res = get_inode(path, &e, 1)) != 0)
+        return res;
+
+    res = do_trunc(&e, off);
+    free_inode(&e);
+    return res;
+}
+
 static struct fuse_operations mongo_oper = {
     .getattr    = mongo_getattr,
     .readdir    = mongo_readdir,
     .open       = mongo_open,
     .read       = mongo_read,
-    .write      = mongo_write
+    .write      = mongo_write,
+    .create    =  mongo_create,
+    .truncate   = mongo_truncate
 };
 
 int main(int argc, char *argv[])
 {
+    int res = mongo_client( &conn, "127.0.0.1", 27017 );
+    if ( res != MONGO_OK )
+        return res;
     return fuse_main(argc, argv, &mongo_oper, NULL);
 }
