@@ -86,7 +86,7 @@ int get_inode(const char * path, struct inode * out, int getdata) {
         key = bson_iterator_key(&i);
         if(strcmp(key, "_id") == 0)
             memcpy(&out->oid, bson_iterator_oid(&i), sizeof(bson_oid_t));
-         else if(strcmp(key, "mode") == 0)
+        else if(strcmp(key, "mode") == 0)
             out->mode = bson_iterator_int(&i);
         else if(strcmp(key, "owner") == 0)
             out->owner = bson_iterator_long(&i);
@@ -99,9 +99,9 @@ int get_inode(const char * path, struct inode * out, int getdata) {
         else if(strcmp(key, "modified") == 0)
             out->modified = bson_iterator_time_t(&i);
          else if(strcmp(key, "data") == 0) {
-            int datalen = bson_iterator_bin_len(&i);
-            out->data = malloc(datalen);
-            memcpy(out->data, bson_iterator_bin_data(&i), datalen);
+            out->data = malloc(EXTENT_SIZE);
+            out->datalen = bson_iterator_bin_len(&i);
+            memcpy(out->data, bson_iterator_bin_data(&i), out->datalen);
         }
         else if(strcmp(key, "dirents")) {
             bson_iterator sub;

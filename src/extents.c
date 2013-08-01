@@ -12,14 +12,19 @@
 extern const char * blocks_name;
 extern mongo conn;
 
-int commit_exent(struct inode * ent, struct extent *e) {
+void free_extents(struct extent * head) {
+    while(head) {
+        struct extent * n = head->next;
+        free(head);
+        head = n;
+    }
+}
+
+int commit_extent(struct inode * ent, struct extent *e) {
     int res;
     bson doc, cond;
 
-    if(e->committed)
-        return 0;
-
-    bson_ensure_space(&doc, e->size + 128);
+    bson_ensure_space(&doc, EXTENT_SIZE + 128);
     bson_append_oid(&doc, "_id", &e->oid);
     bson_append_oid(&doc, "inode", &ent->oid);
     bson_append_long(&doc, "start", e->start);
@@ -37,29 +42,29 @@ int commit_exent(struct inode * ent, struct extent *e) {
     }
     bson_destroy(&doc);
     bson_destroy(&cond);
-    e->committed = 1;
     return 0;
 }
 
-static int extent_cmp(const void * ra, const void * rb) {
-    const struct extent * a = ra, *b = rb;
-    if(a->start < b->start)
-        return -1;
-    else if(a->start > b->start)
-        return 1;
+int commit_extents(struct inode * ent, struct extent * e) {
+    while(e) {
+        int res = commit_extent(ent, e);
+        if(res != 0)
+            return res;
+        e = e->next;
+    }
     return 0;
 }
 
 int resolve_extent(struct inode * e, off_t start,
-    off_t end, struct extent ** realout, int * countout) {
+    off_t end, struct extent ** realout) {
     bson query;
-    int res, x, count, y;
+    int res, x, count;
     struct extent * out = NULL;
     mongo_cursor curs;
     bson_iterator i;
     bson_type bt;
     const char * key;
-
+    struct extent * tail = NULL;
 
     start = (start/EXTENT_SIZE)*EXTENT_SIZE;
 
@@ -81,62 +86,44 @@ int resolve_extent(struct inode * e, off_t start,
     }
     bson_append_finish_object(&query);
     bson_append_start_object(&query, "$orderby");
-    bson_append_int(&query, "start", 1);
+    bson_append_int(&query, "start", -1);
     bson_append_finish_object(&query);
     bson_finish(&query);
 
     mongo_cursor_init(&curs, &conn, blocks_name);
     mongo_cursor_set_query(&curs, &query);
 
-    res = mongo_cursor_next(&curs);
-    bson_destroy(&query);
-
-    out = malloc(sizeof(struct extent) * count);
-    memset(out, 0, sizeof(struct extent) * count);
-    *realout = out;
-    *countout = count;
-
-    x = 0;
     while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
+        out = malloc(sizeof(struct extent));
+        memset(out, 0, sizeof(struct extent));
+        out->next = tail;
+        tail = out;
+
         const bson * curbson = mongo_cursor_bson(&curs);
         bson_iterator_init(&i, curbson);
 
-        out[x].committed = 1;
         while((bt = bson_iterator_next(&i)) > 0) {
             key = bson_iterator_key(&i);
             if(strcmp(key, "_id") == 0)
-                memcpy(&out[x].oid, bson_iterator_oid(&i), sizeof(bson_oid_t));
+                memcpy(&out->oid, bson_iterator_oid(&i), sizeof(bson_oid_t));
             else if(strcmp(key, "start") == 0)
-                out[x].start = bson_iterator_long(&i);
+                out->start = bson_iterator_long(&i);
             else if(strcmp(key, "data") == 0) {
-                out[x].size = bson_iterator_bin_len(&i);
-                memcpy(out[x].data,
-                    bson_iterator_bin_data(&i), out[x].size);
+                out->size = bson_iterator_bin_len(&i);
+                memcpy(out->data,
+                    bson_iterator_bin_data(&i), out->size);
             }
         }
     }
 
+    bson_destroy(&query);
     if(curs.err != MONGO_CURSOR_EXHAUSTED) {
         fprintf(stderr, "Error getting extents %d", curs.err);
         free(out);
         return -EIO;
     }
 
-    if(x == count)
-        return 0;
-
-    for(y = 0; y < count; y++) {
-        struct extent s;
-        off_t curoff = start + (EXTENT_SIZE * y);
-        s.start = curoff;
-        if(bsearch(&s, out, x, sizeof(struct extent), extent_cmp) != NULL)
-            continue;
-
-        out[x].start = curoff;
-        bson_oid_gen(&out[x++].oid);
-    }
-
-    qsort(out, count, sizeof(struct extent), extent_cmp);
+    *realout = out;
 
     return 0;
 }
