@@ -28,14 +28,18 @@ int commit_extent(struct inode * ent, struct extent *e) {
     if(!doc)
         return -ENOMEM;
     bson_init(doc);
-    bson_append_oid(doc, "_id", &e->oid);
+    bson_append_start_object(doc, "_id");
     bson_append_oid(doc, "inode", &ent->oid);
     bson_append_long(doc, "start", e->start);
+    bson_append_finish_object(doc);
     bson_append_binary(doc, "data", 0, e->data, e->size);
     bson_finish(doc);
 
     bson_init(&cond);
-    bson_append_oid(&cond, "_id", &e->oid);
+    bson_append_start_object(&cond, "_id");
+    bson_append_oid(&cond, "inode", &ent->oid);
+    bson_append_long(&cond, "start", e->start);
+    bson_append_finish_object(&cond);
     bson_finish(&cond);
 
     res = mongo_update(conn, blocks_name, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
@@ -76,16 +80,16 @@ int resolve_extent(struct inode * e, off_t start,
 
     bson_init(&query);
     bson_append_start_object(&query, "$query");
-    bson_append_oid(&query, "inode", &e->oid);
+    bson_append_oid(&query, "_id.inode", &e->oid);
     if(end - start < EXTENT_SIZE) {
-        bson_append_long(&query, "start", start);
+        bson_append_long(&query, "_id.start", start);
         count = 1;
     } else {
         x = end % EXTENT_SIZE;
         end = ((end / EXTENT_SIZE) + (x?1:0)) * EXTENT_SIZE;
         count = end - start / EXTENT_SIZE;
 
-        bson_append_start_object(&query, "start");
+        bson_append_start_object(&query, "_id.start");
         bson_append_long(&query, "$gte", start);
         bson_append_long(&query, "$lte", end);
         bson_append_finish_object(&query);
@@ -117,10 +121,17 @@ int resolve_extent(struct inode * e, off_t start,
 
         while((bt = bson_iterator_next(&i)) > 0) {
             key = bson_iterator_key(&i);
-            if(strcmp(key, "_id") == 0)
-                memcpy(&out->oid, bson_iterator_oid(&i), sizeof(bson_oid_t));
-            else if(strcmp(key, "start") == 0)
-                out->start = bson_iterator_long(&i);
+            if(strcmp(key, "_id") == 0) {
+                bson_iterator sub;
+                bson_iterator_subiterator(&i, &sub);
+                while(bson_iterator_next(&sub)) {
+                    key = bson_iterator_key(&sub);
+                    if(strcmp(key, "inode") == 0)
+                        memcpy(&out->inode, bson_iterator_oid(&i), sizeof(bson_oid_t));
+                    else if(strcmp(key, "start") == 0)
+                        out->start = bson_iterator_long(&sub);
+                }
+            }
             else if(strcmp(key, "data") == 0) {
                 out->size = bson_iterator_bin_len(&i);
                 memcpy(out->data,

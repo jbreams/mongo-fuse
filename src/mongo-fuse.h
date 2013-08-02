@@ -4,8 +4,7 @@
 
 struct extent {
     struct extent * next;
-    char committed;
-    bson_oid_t oid;
+    bson_oid_t inode;
     uint32_t size;
     uint64_t start;
     char data[EXTENT_SIZE];

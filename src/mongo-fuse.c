@@ -169,7 +169,7 @@ static int mongo_write(const char *path, const char *buf, size_t size,
 {
     struct inode e;
     int res;
-    struct extent * o = NULL, *el = NULL, *last = NULL;
+    struct extent * o = NULL, *last = NULL;
     char * block = (char*)buf;
     size_t tocopy;
     const size_t end = size + offset,
@@ -203,35 +203,25 @@ static int mongo_write(const char *path, const char *buf, size_t size,
     }
 
     if(end - offset > EXTENT_SIZE) {
-        res = resolve_extent(&e, offset, last_block - 1, &o, 0);
-        if(res != 0)
-            goto cleanup;
-
-        el = o;
+        o = NULL;
         while(end - offset > EXTENT_SIZE && offset != last_block) {
-            if(!el || el->start != offset) {
-                struct extent * n = malloc(sizeof(struct extent));
-                if(!n) {
-                    fprintf(stderr, "Error allocating block\n");
-                    res = -ENOMEM;
-                    goto cleanup;
-                }
-                n->size = EXTENT_SIZE;
-                n->start = offset;
-                bson_oid_gen(&n->oid);
-                memcpy(n->data, block, EXTENT_SIZE);
-                n->next = o;
-                o = n;
-                goto advance;
+            struct extent * n = malloc(sizeof(struct extent));
+            if(!n) {
+                fprintf(stderr, "Error allocating block\n");
+                res = -ENOMEM;
+                goto cleanup;
             }
-
-            memcpy(el->data, block, EXTENT_SIZE);
-            last = el;
-            el = el->next;
-    advance:
+            n->size = EXTENT_SIZE;
+            n->start = offset;
+            memcpy(&n->inode, &e.oid, sizeof(bson_oid_t));
+            memcpy(n->data, block, EXTENT_SIZE);
+            n->next = o;
+            o = n;
             block += tocopy;
             offset += tocopy;
         }
+        commit_extents(&e, o);
+        free_extents(o);
     }
 
     res = resolve_extent(&e, last_block, end, &last, 1);
@@ -245,7 +235,7 @@ static int mongo_write(const char *path, const char *buf, size_t size,
             goto cleanup;
         }
         last->start = last_block;
-        bson_oid_gen(&last->oid);
+        memcpy(&last->inode, &e.oid, sizeof(bson_oid_t));
     }
 
     memcpy(last->data, block, end - offset);
