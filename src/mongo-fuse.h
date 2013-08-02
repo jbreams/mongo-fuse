@@ -1,5 +1,5 @@
 
-#define EXTENT_SIZE 2
+#define EXTENT_SIZE 8
 #define FUSE_USE_VERSION 26
 
 struct extent {
@@ -24,6 +24,7 @@ struct inode {
     uint64_t owner;
     uint64_t group;
     uint64_t size;
+    uint64_t dev;
     time_t created;
     time_t modified;
     size_t datalen;

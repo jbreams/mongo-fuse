@@ -13,40 +13,46 @@ extern const char * inodes_name;
 extern mongo conn;
 
 int commit_inode(struct inode * e) {
-    bson cond, doc;
+    bson cond, *doc;
     char istr[4];
     struct dirent * cde = e->dirents;
     int res;
+
+    doc = bson_alloc();
+    if(!doc)
+        return -ENOMEM;
+
+    bson_init(doc);
+    bson_append_oid(doc, "_id", &e->oid);
+    bson_append_start_array(doc, "dirents");
+    res = 0;
+    while(cde) {
+        bson_numstr(istr, res++);
+        bson_append_string(doc, istr, cde->path);
+        cde = cde->next;
+    }
+    bson_append_finish_array(doc);
+
+    bson_append_int(doc, "mode", e->mode);
+    bson_append_long(doc, "owner", e->owner);
+    bson_append_long(doc, "group", e->group);
+    bson_append_long(doc, "size", e->size);
+    if(e->dev > 0)
+        bson_append_long(doc, "dev", e->dev);
+    bson_append_time_t(doc, "created", e->created);
+    bson_append_time_t(doc, "modified", e->modified);
+    if(e->data && e->datalen > 0)
+        bson_append_binary(doc, "data", 0, e->data, e->datalen);
+    bson_finish(doc);
 
     bson_init(&cond);
     bson_append_oid(&cond, "_id", &e->oid);
     bson_finish(&cond);
 
-    bson_init(&doc);
-    bson_append_oid(&doc, "_id", &e->oid);
-    bson_append_start_array(&doc, "dirents");
-    res = 0;
-    while(cde) {
-        bson_numstr(istr, res++);
-        printf("Adding %s\n", cde->path);
-        bson_append_string(&doc, istr, cde->path);
-        cde = cde->next;
-    }
-    bson_append_finish_array(&doc);
-
-    bson_append_int(&doc, "mode", e->mode);
-    bson_append_long(&doc, "owner", e->owner);
-    bson_append_long(&doc, "group", e->group);
-    bson_append_long(&doc, "size", e->size);
-    bson_append_time_t(&doc, "created", e->created);
-    bson_append_time_t(&doc, "modified", e->modified);
-    if(e->data && e->datalen > 0)
-        bson_append_binary(&doc, "data", 0, e->data, e->datalen);
-
-    bson_finish(&doc);
-    res = mongo_update(&conn, inodes_name, &cond, &doc, MONGO_UPDATE_UPSERT, NULL);
+    res = mongo_update(&conn, inodes_name, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
     bson_destroy(&cond);
-    bson_destroy(&doc);
+    bson_destroy(doc);
+    bson_dealloc(doc);
     if(res != MONGO_OK) {
         fprintf(stderr, "Error committing inode\n");
         return -EIO;
@@ -104,6 +110,8 @@ int get_inode(const char * path, struct inode * out, int getdata) {
             out->created = bson_iterator_time_t(&i);
         else if(strcmp(key, "modified") == 0)
             out->modified = bson_iterator_time_t(&i);
+        else if(strcmp(key, "dev") == 0)
+            out->dev = bson_iterator_long(&i);
         else if(strcmp(key, "data") == 0 && getdata) {
             if(bt == BSON_STRING) {
                 out->datalen = bson_iterator_string_len(&i);

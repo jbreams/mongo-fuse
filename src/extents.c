@@ -22,26 +22,31 @@ void free_extents(struct extent * head) {
 
 int commit_extent(struct inode * ent, struct extent *e) {
     int res;
-    bson doc, cond;
+    bson * doc, cond;
 
-    bson_init(&doc);
-    bson_append_oid(&doc, "_id", &e->oid);
-    bson_append_oid(&doc, "inode", &ent->oid);
-    bson_append_long(&doc, "start", e->start);
-    bson_append_binary(&doc, "data", 0, e->data, e->size);
-    bson_finish(&doc);
+    doc = bson_alloc();
+    if(!doc)
+        return -ENOMEM;
+    bson_init(doc);
+    bson_append_oid(doc, "_id", &e->oid);
+    bson_append_oid(doc, "inode", &ent->oid);
+    bson_append_long(doc, "start", e->start);
+    bson_append_binary(doc, "data", 0, e->data, e->size);
+    bson_finish(doc);
 
     bson_init(&cond);
     bson_append_oid(&cond, "_id", &e->oid);
     bson_finish(&cond);
 
-    res = mongo_update(&conn, blocks_name, &cond, &doc, MONGO_UPDATE_UPSERT, NULL);
+    res = mongo_update(&conn, blocks_name, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
+    bson_destroy(doc);
+    bson_dealloc(doc);
+    bson_destroy(&cond);
+
     if(res != MONGO_OK) {
         fprintf(stderr, "Error committing block\n");
         return -EIO;
     }
-    bson_destroy(&doc);
-    bson_destroy(&cond);
     return 0;
 }
 

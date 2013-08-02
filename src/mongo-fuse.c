@@ -34,7 +34,6 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
         return res;
     }
 
-    printf("I'm in getattr for %s \n", path);
     res = get_inode(path, &e, 0);
     if(res != 0)
         return res;
@@ -49,6 +48,7 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
     stbuf->st_ctime = e.created;
     stbuf->st_mtime = e.modified;
     stbuf->st_atime = e.modified;
+    stbuf->st_dev = e.dev;
 
     free_inode(&e);
     return res;
@@ -69,7 +69,6 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     filler(buf, "..", NULL, 0);
 
     sprintf(regexp, "^%s/[^/]+", path + 1);
-    printf("%s\n", regexp);
     bson_init(&query);
     bson_append_regex(&query, "dirents", regexp, "");
     bson_finish(&query);
@@ -134,7 +133,7 @@ static int mongo_write(const char *path, const char *buf, size_t size,
 {
     struct inode e;
     int res;
-    struct extent * o, *el, *last = NULL;
+    struct extent * o = NULL, *el = NULL, *last = NULL;
     char * block = (char*)buf;
     size_t tocopy;
     const size_t end = size + offset;
@@ -147,8 +146,6 @@ static int mongo_write(const char *path, const char *buf, size_t size,
 
     e.modified = time(NULL);
 
-    printf("%s %lu %llu\n", path, size, offset);
-
     if(offset < EXTENT_SIZE) {
         size_t sizediff = EXTENT_SIZE - offset;
         tocopy = size > sizediff ? sizediff : size;
@@ -159,8 +156,10 @@ static int mongo_write(const char *path, const char *buf, size_t size,
     }
 
     if(block - buf == size) {
-        e.size += tocopy;
-        e.datalen += tocopy;
+        if(end > e.size) {
+            e.size += tocopy;
+            e.datalen += tocopy;
+        }
         commit_inode(&e);
         free_inode(&e);
         return tocopy;
@@ -183,11 +182,8 @@ static int mongo_write(const char *path, const char *buf, size_t size,
             n->start = offset;
             bson_oid_gen(&n->oid);
             memcpy(n->data, block, tocopy);
-            if(last)
-                last->next = n;
-            else
-                o = n;
-            n->next = el;
+            n->next = o;
+            o = n;
             goto advance;
         }
 
@@ -216,7 +212,6 @@ static int mongo_open(const char *path, struct fuse_file_info *fi)
     struct inode e;
     int res;
 
-    printf("I'm in open\n");
     res = get_inode(path, &e, 0);
     if(res == 0)
         free_inode(&e);
@@ -231,7 +226,6 @@ static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * 
 
 
     res = get_inode(path, &e, 0);
-    printf("I'm in create %d\n", res);
     if(res == 0) {
         free_inode(&e);
         fprintf(stderr, "Exiting because it already exists\n");
