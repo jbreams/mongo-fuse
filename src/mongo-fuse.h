@@ -1,5 +1,5 @@
 
-#define EXTENT_SIZE 8
+#define EXTENT_SIZE 262144
 #define FUSE_USE_VERSION 26
 
 struct extent {

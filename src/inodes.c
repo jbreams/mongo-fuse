@@ -130,6 +130,7 @@ int get_inode(const char * path, struct inode * out, int getdata) {
                 strcpy(cde->path, bson_iterator_string(&sub));
                 cde->next = out->dirents;
                 out->dirents = cde;
+                out->direntcount++;
             }
         }
     }

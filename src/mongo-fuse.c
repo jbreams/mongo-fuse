@@ -21,22 +21,26 @@
 
 char * blocks_name = "test.blocks";
 char * inodes_name = "test.inodes";
+char * inodes_coll = "inodes";
+char * dbname = "test";
 mongo conn;
+
+static int mongo_mkdir(const char * path, mode_t mode);
 
 static int mongo_getattr(const char *path, struct stat *stbuf) {
     int res = 0;
     struct inode e;
 
     memset(stbuf, 0, sizeof(struct stat));
-    if (strcmp(path, "/") == 0) {
-        stbuf->st_mode = S_IFDIR | 0755;
-        stbuf->st_nlink = 2;
+    res = get_inode(path, &e, 0);
+    if(res != 0) {
+        if(strcmp(path, "/") == 0) {
+            stbuf->st_mode = S_IFDIR | 0755;
+            stbuf->st_nlink = 2;
+            return mongo_mkdir("/", 0755);
+        }
         return res;
     }
-
-    res = get_inode(path, &e, 0);
-    if(res != 0)
-        return res;
 
     stbuf->st_nlink = e.direntcount;
     stbuf->st_mode = e.mode;
@@ -255,6 +259,49 @@ static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * 
     return res;
 }
 
+static int mongo_mkdir(const char * path, mode_t mode) {
+    struct inode e;
+    int res;
+
+    return mongo_create(path, mode | S_IFDIR, NULL);
+}
+
+static int mongo_rmdir(const char * path) {
+    struct inode e;
+    int res;
+    double dres;
+    bson cond;
+    size_t pathlen = strlen(path);
+    char * regexp = malloc(pathlen + 10);
+
+    sprintf(regexp, "^%s/[^/]+", path + 1);
+    bson_init(&cond);
+    bson_append_regex(&cond, "dirents", regexp, "");
+    bson_finish(&cond);
+
+    dres = mongo_count(&conn, dbname, inodes_coll, &cond);
+    bson_destroy(&cond);
+    free(regexp);
+
+    if(dres > 1)
+        return -ENOTEMPTY;
+
+    if((res = get_inode(path, &e, 0)) != 0)
+        return res;
+
+    bson_init(&cond);
+    bson_append_oid(&cond, "_id", &e.oid);
+    bson_finish(&cond);
+
+    res = mongo_remove(&conn, inodes_name, &cond, NULL);
+    bson_destroy(&cond);
+    if(res != MONGO_OK) {
+        fprintf(stderr, "Error removing inode entry for %s\n", path);
+        return -EIO;
+    }
+    return 0;
+}
+
 static int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                       struct fuse_file_info *fi) {
     struct inode e;
@@ -364,14 +411,119 @@ static int mongo_truncate(const char * path, off_t off) {
     return res;
 }
 
+static int mongo_link(const char * path, const char * newpath) {
+    struct inode e;
+    int res;
+
+    if((res = get_inode(path, &e, 0)) != 0)
+        return res;
+
+    if(e.mode & S_IFDIR) {
+        free_inode(&e);
+        return -EPERM;
+    }
+
+    struct dirent * newlink = malloc(sizeof(struct dirent) + strlen(newpath));
+    strcpy(newlink->path, newpath);
+    newlink->next = e.dirents;
+    e.direntcount++;
+    return commit_inode(&e);
+}
+
+static int mongo_unlink(const char * path) {
+    struct inode e;
+    int res;
+
+    printf("%s\n", path);
+    if((res = get_inode(path, &e, 0)) != 0)
+        return res;
+
+    if(e.direntcount > 1) {
+        struct dirent * c = e.dirents, *l = NULL;
+        while(c && strcmp(c->path, path) != 0) {
+            l = c;
+            c = c->next;
+        }
+        if(!l)
+            e.dirents = c;
+        else
+            l->next = c->next;
+        free(c);
+        e.direntcount--;
+        res = commit_inode(&e);
+        free_inode(&e);
+        return res;
+    }
+
+    bson cond;
+    bson_init(&cond);
+    bson_append_oid(&cond, "_id", &e.oid);
+    bson_finish(&cond);
+
+    res = mongo_remove(&conn, inodes_name, &cond, NULL);
+    bson_destroy(&cond);
+    if(res != MONGO_OK) {
+        fprintf(stderr, "Error removing inode entry for %s\n", path);
+        return -EIO;
+    }
+
+    bson_init(&cond);
+    bson_append_oid(&cond, "inode", &e.oid);
+    bson_finish(&cond);
+
+    res = mongo_remove(&conn, blocks_name, &cond, NULL);
+    bson_destroy(&cond);
+    if(res != MONGO_OK) {
+        fprintf(stderr, "Error removing blocks for %s\n", path);
+        return -EIO;
+    }
+    return 0;
+}
+
+static int mongo_chmod(const char * path, mode_t mode) {
+    struct inode e;
+    int res;
+
+    if((res = get_inode(path, &e, 0)) != 0)
+        return res;
+
+    e.mode = mode;
+
+    res = commit_inode(&e);
+    free_inode(&e);
+    return res;
+}
+
+static int mongo_chown(const char * path, uid_t user, gid_t group) {
+    struct inode e;
+    int res;
+
+    if((res = get_inode(path, &e, 0)) != 0)
+        return res;
+
+    e.owner = user;
+    e.group = group;
+
+    res = commit_inode(&e);
+    free_inode(&e);
+    return res;
+
+}
+
 static struct fuse_operations mongo_oper = {
     .getattr    = mongo_getattr,
     .readdir    = mongo_readdir,
     .open       = mongo_open,
     .read       = mongo_read,
     .write      = mongo_write,
-    .create    =  mongo_create,
-    .truncate   = mongo_truncate
+    .create     = mongo_create,
+    .truncate   = mongo_truncate,
+    .mkdir      = mongo_mkdir,
+    .unlink     = mongo_unlink,
+    .link       = mongo_link,
+    .chmod      = mongo_chmod,
+    .chown      = mongo_chown,
+    .rmdir      = mongo_rmdir
 };
 
 int main(int argc, char *argv[])
