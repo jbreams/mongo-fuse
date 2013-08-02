@@ -24,7 +24,7 @@ int commit_extent(struct inode * ent, struct extent *e) {
     int res;
     bson doc, cond;
 
-    bson_ensure_space(&doc, EXTENT_SIZE + 128);
+    bson_init(&doc);
     bson_append_oid(&doc, "_id", &e->oid);
     bson_append_oid(&doc, "inode", &ent->oid);
     bson_append_long(&doc, "start", e->start);
@@ -124,6 +124,7 @@ int resolve_extent(struct inode * e, off_t start,
     }
 
     *realout = out;
+    printf("Resolved extents\n");
 
     return 0;
 }

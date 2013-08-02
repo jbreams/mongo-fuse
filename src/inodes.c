@@ -41,7 +41,7 @@ int commit_inode(struct inode * e) {
     bson_append_time_t(&doc, "created", e->created);
     bson_append_time_t(&doc, "modified", e->modified);
     if(e->data && e->datalen > 0)
-        bson_append_binary(&doc, "data", 0, e->data, e->size);
+        bson_append_binary(&doc, "data", 0, e->data, e->datalen);
 
     bson_finish(&doc);
     res = mongo_update(&conn, inodes_name, &cond, &doc, MONGO_UPDATE_UPSERT, NULL);
@@ -113,7 +113,7 @@ int get_inode(const char * path, struct inode * out, int getdata) {
                 memcpy(out->data, bson_iterator_bin_data(&i), out->datalen);
             }
         }
-        else if(strcmp(key, "dirents")) {
+        else if(strcmp(key, "dirents") == 0) {
             bson_iterator sub;
             bson_iterator_subiterator(&i, &sub);
             while((bt = bson_iterator_next(&sub)) > 0) {

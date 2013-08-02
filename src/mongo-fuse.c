@@ -147,16 +147,20 @@ static int mongo_write(const char *path, const char *buf, size_t size,
 
     e.modified = time(NULL);
 
+    printf("%s %lu %llu\n", path, size, offset);
+
     if(offset < EXTENT_SIZE) {
         size_t sizediff = EXTENT_SIZE - offset;
         tocopy = size > sizediff ? sizediff : size;
         memcpy(e.data + offset, block, tocopy);
         offset += tocopy;
         block += tocopy;
-        e.datalen = tocopy + offset;
+        e.datalen += tocopy;
     }
 
     if(block - buf == size) {
+        e.size += tocopy;
+        e.datalen += tocopy;
         commit_inode(&e);
         free_inode(&e);
         return tocopy;
@@ -177,6 +181,7 @@ static int mongo_write(const char *path, const char *buf, size_t size,
             struct extent * n = malloc(sizeof(struct extent));
             n->size = tocopy;
             n->start = offset;
+            bson_oid_gen(&n->oid);
             memcpy(n->data, block, tocopy);
             if(last)
                 last->next = n;
@@ -195,6 +200,10 @@ advance:
     }
 
     res = commit_extents(&e, o);
+    if(end > e.size) {
+        e.size = end;
+        res = commit_inode(&e);
+    }
     free_inode(&e);
     free_extents(o);
     if(res != 0)
