@@ -23,7 +23,8 @@ char * blocks_name = "test.blocks";
 char * inodes_name = "test.inodes";
 char * inodes_coll = "inodes";
 char * dbname = "test";
-mongo conn;
+const char * mongo_host = "127.0.0.1";
+int mongo_port = 27017;
 
 static int mongo_mkdir(const char * path, mode_t mode);
 
@@ -68,6 +69,7 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     size_t pathlen = strlen(path);
     char * regexp = malloc(pathlen + 10);
     int res;
+    mongo * conn = get_conn();
 
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
@@ -86,7 +88,7 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     bson_append_int(&fields, "data", 0);
     bson_finish(&fields);
 
-    mongo_cursor_init(&curs, &conn, inodes_name);
+    mongo_cursor_init(&curs, conn, inodes_name);
     mongo_cursor_set_query(&curs, &query);
     mongo_cursor_set_fields(&curs, &fields);
 
@@ -145,9 +147,10 @@ static int mongo_write(const char *path, const char *buf, size_t size,
     struct extent * o = NULL, *el = NULL, *last = NULL;
     char * block = (char*)buf;
     size_t tocopy;
-    const size_t end = size + offset;
+    const size_t end = size + offset,
+        last_block = (end / EXTENT_SIZE) * EXTENT_SIZE;
 
-    if((res = get_inode(path, &e, 1)) != 0)
+    if((res = get_inode(path, &e, offset < EXTENT_SIZE ? 1: 0)) != 0)
         return res;
 
     if(e.mode & S_IFDIR)
@@ -174,43 +177,65 @@ static int mongo_write(const char *path, const char *buf, size_t size,
         return tocopy;
     }
 
-    res = resolve_extent(&e, offset, offset + size, &o);
-    if(res != 0)
-        return res;
+    if(end - offset > EXTENT_SIZE) {
+        res = resolve_extent(&e, offset, last_block - 1, &o, 0);
+        if(res != 0)
+            goto cleanup;
 
-    el = o;
-    while(block - buf != size) {
-        if(end - offset < EXTENT_SIZE)
-            tocopy = end - offset;
-        else
-            tocopy = EXTENT_SIZE;
+        el = o;
+        while(end - offset > EXTENT_SIZE && offset != last_block) {
+            if(!el || el->start != offset) {
+                struct extent * n = malloc(sizeof(struct extent));
+                if(!n) {
+                    fprintf(stderr, "Error allocating block\n");
+                    res = -ENOMEM;
+                    goto cleanup;
+                }
+                n->size = EXTENT_SIZE;
+                n->start = offset;
+                bson_oid_gen(&n->oid);
+                memcpy(n->data, block, EXTENT_SIZE);
+                n->next = o;
+                o = n;
+                goto advance;
+            }
 
-        if(!el || el->start != offset) {
-            struct extent * n = malloc(sizeof(struct extent));
-            n->size = tocopy;
-            n->start = offset;
-            bson_oid_gen(&n->oid);
-            memcpy(n->data, block, tocopy);
-            n->next = o;
-            o = n;
-            goto advance;
+            memcpy(el->data, block, EXTENT_SIZE);
+            last = el;
+            el = el->next;
+    advance:
+            block += tocopy;
+            offset += tocopy;
         }
-
-        memcpy(el->data, block, tocopy);
-        last = el;
-        el = el->next;
-advance:
-        block += tocopy;
-        offset += tocopy;
     }
 
-    res = commit_extents(&e, o);
-    if(end > e.size) {
+    res = resolve_extent(&e, last_block, end, &last, 1);
+    if(res != 0)
+        goto cleanup;
+    if(!last) {
+        last = malloc(sizeof(struct extent));
+        if(!last) {
+            fprintf(stderr, "Error allocating last block!\n");
+            res = -ENOMEM;
+            goto cleanup;
+        }
+        last->start = last_block;
+        bson_oid_gen(&last->oid);
+    }
+
+    memcpy(last->data, block, end - offset);
+    last->size = end - offset;
+    last->next = o;
+
+    res = commit_extents(&e, last);
+    if(res != 0)
+        goto cleanup;
+    if(end > e.size)
         e.size = end;
-        res = commit_inode(&e);
-    }
+    res = commit_inode(&e);
+cleanup:
     free_inode(&e);
-    free_extents(o);
+    free_extents(last);
     if(res != 0)
         return res;
     return size;
@@ -232,7 +257,6 @@ static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * 
     int res;
     int pathlen = strlen(path);
     const struct fuse_context * fcx = fuse_get_context();
-
 
     res = get_inode(path, &e, 0);
     if(res == 0) {
@@ -265,9 +289,6 @@ static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * 
 }
 
 static int mongo_mkdir(const char * path, mode_t mode) {
-    struct inode e;
-    int res;
-
     return mongo_create(path, mode | S_IFDIR, NULL);
 }
 
@@ -278,13 +299,14 @@ static int mongo_rmdir(const char * path) {
     bson cond;
     size_t pathlen = strlen(path);
     char * regexp = malloc(pathlen + 10);
+    mongo * conn = get_conn();
 
     sprintf(regexp, "^%s/[^/]+", path + 1);
     bson_init(&cond);
     bson_append_regex(&cond, "dirents", regexp, "");
     bson_finish(&cond);
 
-    dres = mongo_count(&conn, dbname, inodes_coll, &cond);
+    dres = mongo_count(conn, dbname, inodes_coll, &cond);
     bson_destroy(&cond);
     free(regexp);
 
@@ -298,7 +320,7 @@ static int mongo_rmdir(const char * path) {
     bson_append_oid(&cond, "_id", &e.oid);
     bson_finish(&cond);
 
-    res = mongo_remove(&conn, inodes_name, &cond, NULL);
+    res = mongo_remove(conn, inodes_name, &cond, NULL);
     bson_destroy(&cond);
     if(res != MONGO_OK) {
         fprintf(stderr, "Error removing inode entry for %s\n", path);
@@ -316,7 +338,7 @@ static int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     size_t tocopy;
     const size_t end = size + offset;
 
-    if((res = get_inode(path, &e, 1)) != 0)
+    if((res = get_inode(path, &e, offset < EXTENT_SIZE ? 1: 0)) != 0)
         return res;
 
     if(e.mode & S_IFDIR)
@@ -338,7 +360,7 @@ static int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         return tocopy;
     }
 
-    res = resolve_extent(&e, offset, offset + size, &o);
+    res = resolve_extent(&e, offset, offset + size, &o, 1);
     free_inode(&e);
     if(res != 0)
         return res;
@@ -370,6 +392,7 @@ advance:
 static int do_trunc(struct inode * e, off_t off) {
     bson cond;
     int res;
+    mongo * conn = get_conn();
 
     if(e->mode & S_IFDIR)
         return -EISDIR;
@@ -394,7 +417,7 @@ static int do_trunc(struct inode * e, off_t off) {
         bson_append_finish_object(&cond);
     }
     bson_finish(&cond);
-    res = mongo_remove(&conn, blocks_name, &cond, NULL);
+    res = mongo_remove(conn, blocks_name, &cond, NULL);
     bson_destroy(&cond);
     if(res != MONGO_OK) {
         fprintf(stderr, "Error truncating blocks\n");
@@ -438,6 +461,7 @@ static int mongo_link(const char * newpath, const char * path) {
 static int mongo_unlink(const char * path) {
     struct inode e;
     int res;
+    mongo * conn = get_conn();
 
     if((res = get_inode(path, &e, 0)) != 0)
         return res;
@@ -464,7 +488,7 @@ static int mongo_unlink(const char * path) {
     bson_append_oid(&cond, "_id", &e.oid);
     bson_finish(&cond);
 
-    res = mongo_remove(&conn, inodes_name, &cond, NULL);
+    res = mongo_remove(conn, inodes_name, &cond, NULL);
     bson_destroy(&cond);
     if(res != MONGO_OK) {
         fprintf(stderr, "Error removing inode entry for %s\n", path);
@@ -475,7 +499,7 @@ static int mongo_unlink(const char * path) {
     bson_append_oid(&cond, "inode", &e.oid);
     bson_finish(&cond);
 
-    res = mongo_remove(&conn, blocks_name, &cond, NULL);
+    res = mongo_remove(conn, blocks_name, &cond, NULL);
     bson_destroy(&cond);
     if(res != MONGO_OK) {
         fprintf(stderr, "Error removing blocks for %s\n", path);
@@ -514,6 +538,23 @@ static int mongo_chown(const char * path, uid_t user, gid_t group) {
 
 }
 
+static int mongo_utimens(const char * path, const struct timespec tv[2]) {
+    struct inode e;
+    int res;
+
+    if((res = get_inode(path, &e, 0)) != 0)
+        return res;
+
+    if(tv == NULL)
+        e.modified = time(NULL);
+    else
+        e.modified = tv[1].tv_sec;
+
+    res = commit_inode(&e);
+    free_inode(&e);
+    return res;
+}
+
 static struct fuse_operations mongo_oper = {
     .getattr    = mongo_getattr,
     .readdir    = mongo_readdir,
@@ -527,13 +568,12 @@ static struct fuse_operations mongo_oper = {
     .link       = mongo_link,
     .chmod      = mongo_chmod,
     .chown      = mongo_chown,
-    .rmdir      = mongo_rmdir
+    .rmdir      = mongo_rmdir,
+    .utimens    = mongo_utimens
 };
 
 int main(int argc, char *argv[])
 {
-    int res = mongo_client( &conn, "127.0.0.1", 27017 );
-    if ( res != MONGO_OK )
-        return res;
+    setup_threading();
     return fuse_main(argc, argv, &mongo_oper, NULL);
 }

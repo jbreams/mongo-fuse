@@ -14,6 +14,7 @@ extern mongo conn;
 
 int commit_inode(struct inode * e) {
     bson cond, *doc;
+    mongo * conn = get_conn();
     char istr[4];
     struct dirent * cde = e->dirents;
     int res;
@@ -50,7 +51,7 @@ int commit_inode(struct inode * e) {
     bson_append_oid(&cond, "_id", &e->oid);
     bson_finish(&cond);
 
-    res = mongo_update(&conn, inodes_name, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
+    res = mongo_update(conn, inodes_name, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
     bson_destroy(&cond);
     bson_destroy(doc);
     bson_dealloc(doc);
@@ -67,6 +68,7 @@ int get_inode(const char * path, struct inode * out, int getdata) {
     bson_type bt;
     int res;
     const char * key;
+    mongo * conn = get_conn();
 
     bson_init(&query);
     bson_append_string(&query, "dirents", path);
@@ -78,7 +80,7 @@ int get_inode(const char * path, struct inode * out, int getdata) {
         bson_finish(&fields);
     }
 
-    res = mongo_find_one(&conn, inodes_name, &query,
+    res = mongo_find_one(conn, inodes_name, &query,
             getdata ? bson_shared_empty():&fields, &doc);
 
     if(res != MONGO_OK) {

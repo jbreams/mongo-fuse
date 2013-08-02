@@ -10,7 +10,6 @@
 #include <osxfuse/fuse.h>
 
 extern const char * blocks_name;
-extern mongo conn;
 
 void free_extents(struct extent * head) {
     while(head) {
@@ -23,6 +22,7 @@ void free_extents(struct extent * head) {
 int commit_extent(struct inode * ent, struct extent *e) {
     int res;
     bson * doc, cond;
+    mongo * conn = get_conn();
 
     doc = bson_alloc();
     if(!doc)
@@ -38,7 +38,7 @@ int commit_extent(struct inode * ent, struct extent *e) {
     bson_append_oid(&cond, "_id", &e->oid);
     bson_finish(&cond);
 
-    res = mongo_update(&conn, blocks_name, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
+    res = mongo_update(conn, blocks_name, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
     bson_destroy(doc);
     bson_dealloc(doc);
     bson_destroy(&cond);
@@ -61,8 +61,8 @@ int commit_extents(struct inode * ent, struct extent * e) {
 }
 
 int resolve_extent(struct inode * e, off_t start,
-    off_t end, struct extent ** realout) {
-    bson query;
+    off_t end, struct extent ** realout, int getdata) {
+    bson query, fields;
     int res, x, count;
     struct extent * out = NULL;
     mongo_cursor curs;
@@ -70,6 +70,7 @@ int resolve_extent(struct inode * e, off_t start,
     bson_type bt;
     const char * key;
     struct extent * tail = NULL;
+    mongo * conn = get_conn();
 
     start = (start/EXTENT_SIZE)*EXTENT_SIZE;
 
@@ -95,8 +96,15 @@ int resolve_extent(struct inode * e, off_t start,
     bson_append_finish_object(&query);
     bson_finish(&query);
 
-    mongo_cursor_init(&curs, &conn, blocks_name);
+    mongo_cursor_init(&curs, conn, blocks_name);
     mongo_cursor_set_query(&curs, &query);
+
+    if(!getdata) {
+        bson_init(&fields);
+        bson_append_int(&fields, "data", 0);
+        bson_finish(&fields);
+        mongo_cursor_set_fields(&curs, &fields);
+    }
 
     while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
         out = malloc(sizeof(struct extent));
@@ -122,6 +130,8 @@ int resolve_extent(struct inode * e, off_t start,
     }
 
     bson_destroy(&query);
+    if(!getdata)
+        bson_destroy(&fields);
     if(curs.err != MONGO_CURSOR_EXHAUSTED) {
         fprintf(stderr, "Error getting extents %d", curs.err);
         free(out);
@@ -129,7 +139,6 @@ int resolve_extent(struct inode * e, off_t start,
     }
 
     *realout = out;
-    printf("Resolved extents\n");
 
     return 0;
 }

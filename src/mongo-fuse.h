@@ -31,12 +31,19 @@ struct inode {
     char * data;
 };
 
+struct inode * get_last_file();
+void set_last_extent(struct extent * e);
+struct extent * get_last_extent();
+mongo * get_conn();
+void setup_threading();
+
+
 void free_inode(struct inode *e);
 int get_inode(const char * path, struct inode * out, int getdata);
 int commit_inode(struct inode * e);
 
 int commit_extents(struct inode * ent, struct extent *e);
 int resolve_extent(struct inode * e, off_t start,
-    off_t end, struct extent ** realout);
+    off_t end, struct extent ** realout, int getdata);
 void free_extents(struct extent * head);
 
