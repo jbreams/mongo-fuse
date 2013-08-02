@@ -72,7 +72,12 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
 
-    sprintf(regexp, "^%s/[^/]+", path + 1);
+    if(strcmp(path, "/") == 0) {
+        path++;
+    } else
+        pathlen++;
+    sprintf(regexp, "^%s/[^/]+$", path);
+    printf("%s %s\n", regexp, path);
     bson_init(&query);
     bson_append_regex(&query, "dirents", regexp, "");
     bson_finish(&query);
@@ -411,7 +416,7 @@ static int mongo_truncate(const char * path, off_t off) {
     return res;
 }
 
-static int mongo_link(const char * path, const char * newpath) {
+static int mongo_link(const char * newpath, const char * path) {
     struct inode e;
     int res;
 
@@ -434,7 +439,6 @@ static int mongo_unlink(const char * path) {
     struct inode e;
     int res;
 
-    printf("%s\n", path);
     if((res = get_inode(path, &e, 0)) != 0)
         return res;
 
@@ -487,7 +491,7 @@ static int mongo_chmod(const char * path, mode_t mode) {
     if((res = get_inode(path, &e, 0)) != 0)
         return res;
 
-    e.mode = mode;
+    e.mode = (e.mode & S_IFMT) | mode;
 
     res = commit_inode(&e);
     free_inode(&e);

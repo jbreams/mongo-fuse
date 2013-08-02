@@ -23,7 +23,7 @@ int commit_inode(struct inode * e) {
         return -ENOMEM;
 
     bson_init(doc);
-    bson_append_oid(doc, "_id", &e->oid);
+    bson_append_start_object(doc, "$set");
     bson_append_start_array(doc, "dirents");
     res = 0;
     while(cde) {
@@ -43,6 +43,7 @@ int commit_inode(struct inode * e) {
     bson_append_time_t(doc, "modified", e->modified);
     if(e->data && e->datalen > 0)
         bson_append_binary(doc, "data", 0, e->data, e->datalen);
+    bson_append_finish_object(doc);
     bson_finish(doc);
 
     bson_init(&cond);
@@ -81,7 +82,7 @@ int get_inode(const char * path, struct inode * out, int getdata) {
             getdata ? bson_shared_empty():&fields, &doc);
 
     if(res != MONGO_OK) {
-        fprintf(stderr, "find one failed: %d\n", res);
+        fprintf(stderr, "find one failed for %s: %d\n", path, res);
         bson_destroy(&query);
         return -ENOENT;
     }
