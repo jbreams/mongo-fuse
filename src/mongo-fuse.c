@@ -65,8 +65,6 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
 
 static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                          off_t offset, struct fuse_file_info *fi) {
-    (void) offset;
-    (void) fi;
     bson query, fields;
     mongo_cursor curs;
     struct stat stbuf;
@@ -78,12 +76,7 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
 
-    if(strcmp(path, "/") == 0) {
-        path++;
-    } else
-        pathlen++;
-    sprintf(regexp, "^%s/[^/]+$", path);
-    printf("%s %s\n", regexp, path);
+    sprintf(regexp, "^%s/[^/]+$", pathlen == 1 ? path + 1 : path);
     bson_init(&query);
     bson_append_regex(&query, "dirents", regexp, "");
     bson_finish(&query);
@@ -97,48 +90,43 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     mongo_cursor_set_fields(&curs, &fields);
 
     while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
-        bson_iterator i;
-        const char * curpath, *key;
-        bson_type bt;
-
-        bson_iterator_init(&i, mongo_cursor_bson(&curs));
-        while((bt = bson_iterator_next(&i))> 0) {
-            key = bson_iterator_key(&i);
-            if(strcmp(key, "mode") == 0)
-                stbuf.st_mode = bson_iterator_int(&i);
-            else if(strcmp(key, "owner") == 0)
-                stbuf.st_uid = bson_iterator_long(&i);
-            else if(strcmp(key, "group") == 0)
-                stbuf.st_gid = bson_iterator_long(&i);
-            else if(strcmp(key, "size") == 0)
-                stbuf.st_size = bson_iterator_long(&i);
-            else if(strcmp(key, "created") == 0)
-                stbuf.st_ctime = bson_iterator_time_t(&i);
-            else if(strcmp(key, "modified") == 0) {
-                stbuf.st_mtime = bson_iterator_time_t(&i);
-                stbuf.st_atime = stbuf.st_mtime;
-            }
-            else if(strcmp(key, "dirents") == 0) {
-                bson_iterator sub;
-                bson_iterator_subiterator(&i, &sub);
-                while((bt = bson_iterator_next(&sub)) > 0) {
-                    curpath = bson_iterator_string(&sub);
-                    if(strncmp(curpath, path, pathlen) == 0)
-                        break;
-                }
-            }
+        struct inode e;
+        struct dirent * cde;
+        res = read_inode(mongo_cursor_bson(&curs), &e);
+        if(res != 0) {
+            fprintf(stderr, "Error in read_\n");
+            break;
         }
 
-        filler(buf, curpath + pathlen, &stbuf, 0);
+        stbuf.st_nlink = e.direntcount;
+        stbuf.st_mode = e.mode;
+        if(stbuf.st_mode & S_IFDIR)
+            stbuf.st_nlink++;
+        stbuf.st_uid = e.owner;
+        stbuf.st_gid = e.group;
+        stbuf.st_size = e.size;
+        stbuf.st_ctime = e.created;
+        stbuf.st_mtime = e.modified;
+        stbuf.st_atime = e.modified;
+        stbuf.st_dev = e.dev;
+
+        cde = e.dirents;
+        while(cde) {
+            if(strncmp(cde->path, path, pathlen) == 0)
+                filler(buf, cde->path + pathlen, &stbuf, 0);
+            cde = cde->next;
+        }
+        free_inode(&e);
     }
     bson_destroy(&query);
     bson_destroy(&fields);
     free(regexp);
 
-    if(curs.err != MONGO_CURSOR_EXHAUSTED) {
-        fprintf(stderr, "Error reading directory %s: %d", path, curs.err);
+    if(curs.err != MONGO_CURSOR_EXHAUSTED)
         return -EIO;
-    }
+
+    if(res < -1)
+        return res;
 
     return 0;
 }
@@ -186,43 +174,36 @@ static int mongo_open(const char *path, struct fuse_file_info *fi)
 }
 
 static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * fi) {
-    struct inode e;
-    int res;
-    int pathlen = strlen(path);
-    const struct fuse_context * fcx = fuse_get_context();
-
-    res = get_inode(path, &e, 0);
-    if(res == 0) {
-        free_inode(&e);
-        fprintf(stderr, "Exiting because it already exists\n");
-        return 0;
-    }
-    else if(res != -ENOENT) {
-        fprintf(stderr, "Exiting create with error %d\n", res);
-        return res;
-    }
-
-    bson_oid_gen(&e.oid);
-    e.dirents = malloc(sizeof(struct dirent) + pathlen);
-    strcpy(e.dirents->path, path);
-    e.dirents->next = NULL;
-    e.direntcount = 1;
-
-    e.mode = mode;
-    e.owner = fcx->uid;
-    e.group = fcx->gid;
-    e.size = 0;
-    e.created = time(NULL);
-    e.modified = time(NULL);
-    e.data = NULL;
-
-    res = commit_inode(&e);
-    free_inode(&e);
-    return res;
+    return create_inode(path, mode, NULL);
 }
 
 static int mongo_mkdir(const char * path, mode_t mode) {
-    return mongo_create(path, mode | S_IFDIR, NULL);
+    return create_inode(path, mode | S_IFDIR, NULL);
+}
+
+static int mongo_symlink(const char * path, const char * target) {
+    return create_inode(target, 0120777, path);
+}
+
+static int mongo_readlink(const char * path, char * out, size_t outlen) {
+    struct inode e;
+    int res;
+
+    res = get_inode(path, &e, 1);
+    if(res != 0) {
+        free_inode(&e);
+        return res;
+    }
+
+    if(!(e.mode & S_IFLNK)) {
+        free_inode(&e);
+        return res;
+    }
+
+    strncpy(out, e.data, outlen > e.datalen ? e.datalen : outlen);
+    free_inode(&e);
+
+    return 0;
 }
 
 static int mongo_rmdir(const char * path) {
@@ -312,9 +293,10 @@ static int mongo_truncate(const char * path, off_t off) {
     return res;
 }
 
-static int mongo_link(const char * newpath, const char * path) {
+static int mongo_link(const char * path, const char * newpath) {
     struct inode e;
     int res;
+    size_t newpathlen = strlen(newpath);
 
     if((res = get_inode(path, &e, 0)) != 0)
         return res;
@@ -323,12 +305,17 @@ static int mongo_link(const char * newpath, const char * path) {
         free_inode(&e);
         return -EPERM;
     }
+    printf("hardlink %s -> %s\n", path, newpath);
 
-    struct dirent * newlink = malloc(sizeof(struct dirent) + strlen(newpath));
+    struct dirent * newlink = malloc(sizeof(struct dirent) + newpathlen);
     strcpy(newlink->path, newpath);
     newlink->next = e.dirents;
+    newlink->len = newpathlen;
+    e.dirents = newlink;
     e.direntcount++;
-    return commit_inode(&e);
+    res = commit_inode(&e);
+    free_inode(&e);
+    return res;
 }
 
 static int mongo_unlink(const char * path) {
@@ -428,6 +415,22 @@ static int mongo_utimens(const char * path, const struct timespec tv[2]) {
     return res;
 }
 
+static int mongo_access(const char * path, int amode) {
+    const struct fuse_context * fcx = fuse_get_context();
+    struct inode e;
+    int res;
+
+    if(fcx->uid == 0)
+        return 0;
+
+    if((res = get_inode(path, &e, 0)) != 0)
+        return res;
+
+    res = check_access(&e, amode) ? -EACCES : 0;
+    free_inode(&e);
+    return res;
+}
+
 static struct fuse_operations mongo_oper = {
     .getattr    = mongo_getattr,
     .readdir    = mongo_readdir,
@@ -443,7 +446,10 @@ static struct fuse_operations mongo_oper = {
     .chown      = mongo_chown,
     .rmdir      = mongo_rmdir,
     .utimens    = mongo_utimens,
-    .rename     = mongo_rename
+    .rename     = mongo_rename,
+    .access     = mongo_access,
+    .symlink    = mongo_symlink,
+    .readlink   = mongo_readlink
 };
 
 int main(int argc, char *argv[])
