@@ -145,7 +145,7 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 static int mongo_rename(const char * path, const char * newpath) {
     struct inode e;
-    struct dirent * nd;
+    struct dirent * nd, *last = NULL;
     const size_t newpathlen = strlen(newpath);
     int res;
 
@@ -153,8 +153,10 @@ static int mongo_rename(const char * path, const char * newpath) {
         return res;
 
     struct dirent * d = e.dirents;
-    while(d && strcmp(d->path, path) != 0)
+    while(d && strcmp(d->path, path) != 0) {
+        last = d;
         d = d->next;
+    }
 
     nd = realloc(d, sizeof(struct dirent) + newpathlen);
     if(!nd) {
@@ -162,6 +164,10 @@ static int mongo_rename(const char * path, const char * newpath) {
         return -ENOMEM;
     }
 
+    if(last)
+        last->next = nd;
+    else
+        e.dirents = nd;
     strcpy(nd->path, newpath);
     res = commit_inode(&e);
     free_inode(&e);
