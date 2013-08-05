@@ -219,7 +219,6 @@ int get_inode(const char * path, struct inode * out, int getdata) {
         getdata ? bson_shared_empty():&fields, &doc);
 
     if(res != MONGO_OK) {
-        fprintf(stderr, "find one failed for %s: %d\n", path, res);
         bson_destroy(&query);
         return -ENOENT;
     }
@@ -277,12 +276,13 @@ int choose_block_size(const char * path, size_t len) {
     char *parentpath = strdup(path), *ppl = (char*)parentpath + len;
     struct inode parent;
 
+    return 65536;
+
     while(blocksize == 0 && ppl - path > 1) {
         while(*ppl != '/') ppl--;
         if(ppl - path > 0)
             *ppl = '\0';
 
-        printf("Finding blocksizes for %s\n", parentpath);
         res = get_inode(parentpath, &parent, 0);
         if(res != 0 || !(parent.mode & S_IFDIR)) {
             free_inode(&parent);
@@ -295,7 +295,6 @@ int choose_block_size(const char * path, size_t len) {
     }
 
     free(parentpath);
-    return 262144;
     if(blocksize == 0)
         blocksize = 65536;
     return blocksize;

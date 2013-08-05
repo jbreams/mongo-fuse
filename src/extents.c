@@ -31,6 +31,7 @@ void get_block_collection(struct inode * e, char * name) {
     int i;
     switch(e->blocksize) {
         case 4096:
+        default:
             i = 0;
             break;
         case 8192:

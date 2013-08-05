@@ -104,7 +104,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
     struct extent * last = NULL, *new = NULL;
     char * block = (char*)buf;
     const off_t end = size + offset;
-    off_t curblock;
+    off_t curblock, stopat;
     size_t tocopy;
 
     if((res = get_inode(path, &e, 0)) != 0)
@@ -140,8 +140,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
     }*/
 
     curblock = compute_start(&e, offset);
-    while(curblock + e.blocksize <= end) {
-        printf("%llu\n", curblock);
+    while(offset < end) {
         struct extent * cur = NULL;
         if(offset != curblock || end - curblock < e.blocksize) {
             res = resolve_extent(&e, curblock, curblock + e.blocksize, &cur);
@@ -172,8 +171,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
         block += tocopy;
         offset += tocopy;
         curblock = compute_start(&e, offset);
-        printf("writing %llu %llu %llu %lu %lld\n",
-            curblock, offset, end, size, curblock / e.blocksize);
+        printf("%llu %llu %llu %llu %llu\n", tocopy, e.blocksize, curblock, offset, end);
     }
 
     res = commit_extents(&e, new);

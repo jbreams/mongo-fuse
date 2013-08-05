@@ -115,7 +115,6 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
         cde = e.dirents;
         while(cde) {
-            printf("%s -> %s %lu\n", cde->path, path, pathlen);
             if(strncmp(cde->path, path, pathlen) == 0)
                 filler(buf, cde->path + printlen, &stbuf, 0);
             cde = cde->next;
