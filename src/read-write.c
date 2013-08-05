@@ -11,6 +11,7 @@
 #include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <assert.h>
 #include "mongo-fuse.h"
 
 int mongo_read(const char *path, char *buf, size_t size, off_t offset,
@@ -20,9 +21,9 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     struct extent * o, *el;
     char * block = buf;
     size_t tocopy;
-    const size_t end = size + offset;
+    const off_t end = size + offset;
 
-    if((res = get_inode(path, &e, offset < EXTENT_SIZE ? 1: 0)) != 0)
+    if((res = get_inode(path, &e, 0)) != 0)
         return res;
 
     if(e.mode & S_IFDIR)
@@ -31,8 +32,15 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     if(offset > e.size)
         return 0;
 
-    if(offset < EXTENT_SIZE) {
-        size_t sizediff = EXTENT_SIZE - offset;
+
+    /*
+
+    if(offset < e.blocksize) {
+        if((res = fill_data(&e)) != 0) {
+            free_inode(&e);
+            return res;
+        }
+        size_t sizediff = e.blocksize - offset;
         tocopy = size > sizediff ? sizediff : size;
         memcpy(block, e.data + offset, tocopy);
         offset += tocopy;
@@ -41,36 +49,51 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
 
     if(block - buf == size) {
         free_inode(&e);
+        add_block_stat(path, size, 0);
         return tocopy;
     }
+*/
 
-    res = resolve_extent(&e, offset, offset + size, &o, 1);
-    free_inode(&e);
-    if(res != 0)
+    res = resolve_extent(&e, compute_start(&e, offset), offset + size, &o);
+    if(res != 0) {
+        free_inode(&e);
         return res;
+    }
+
+    if(!o) {
+        memset(block, 0, size);
+        free_inode(&e);
+        return size;
+    }
 
     el = o;
     while(block - buf != size) {
-        if(end - offset < EXTENT_SIZE)
+        if(end - offset < e.blocksize)
             tocopy = end - offset;
         else
-            tocopy = EXTENT_SIZE;
+            tocopy = e.blocksize;
 
-        if(!el || el->start != offset) {
-            memset(block, 0, tocopy);
-            goto advance;
+        if(!el) {
+            memset(block, 0, end - offset);
+            block += (end - offset);
+            break;
         }
+        else if(el->start < offset) {
+            printf("%llu %llu %lu\n", el->start, offset, tocopy);
+            memcpy(block, el->data + (offset - el->start), tocopy);
+        }
+        else
+            memcpy(block, el->data, tocopy);
 
-        memcpy(block, el->data, tocopy);
         el = el->next;
-advance:
         block += tocopy;
         offset += tocopy;
     }
 
     if(o)
         free_extents(o);
-    return size;
+    add_block_stat(path, size, 0);
+    return block - buf;
 }
 
 int mongo_write(const char *path, const char *buf, size_t size,
@@ -78,88 +101,96 @@ int mongo_write(const char *path, const char *buf, size_t size,
 {
     struct inode e;
     int res;
-    struct extent * o = NULL, *last = NULL;
+    struct extent * last = NULL, *new = NULL;
     char * block = (char*)buf;
+    const off_t end = size + offset;
+    off_t curblock;
     size_t tocopy;
-    const size_t end = size + offset,
-        last_block = (end / EXTENT_SIZE) * EXTENT_SIZE;
 
-    if((res = get_inode(path, &e, offset < EXTENT_SIZE ? 1: 0)) != 0)
+    if((res = get_inode(path, &e, 0)) != 0)
         return res;
 
     if(e.mode & S_IFDIR)
         return -EISDIR;
 
-    e.modified = time(NULL);
+    /*
 
-    if(offset < EXTENT_SIZE) {
-        size_t sizediff = EXTENT_SIZE - offset;
-        tocopy = size > sizediff ? sizediff : size;
+    if(offset < e.blocksize) {
+        printf("Writing to first block\n");
+        if((res = fill_data(&e)) != 0) {
+            free_inode(&e);
+            return res;
+        }
+        tocopy = e.blocksize - offset;
+        tocopy = size > tocopy ? tocopy : size;
         memcpy(e.data + offset, block, tocopy);
         offset += tocopy;
         block += tocopy;
         e.datalen += tocopy;
     }
 
-    if(block - buf == size) {
+    e.modified = time(NULL);
+    if(offset == end) {
         if(end > e.size)
             e.size += tocopy;
         commit_inode(&e);
         free_inode(&e);
-        return tocopy;
-    }
+        add_block_stat(path, size, 1);
+        return size;
+    }*/
 
-    if(end - offset > EXTENT_SIZE) {
-        o = NULL;
-        while(end - offset > EXTENT_SIZE && offset != last_block) {
-            struct extent * n = malloc(sizeof(struct extent));
-            if(!n) {
-                fprintf(stderr, "Error allocating block\n");
+    curblock = compute_start(&e, offset);
+    while(curblock + e.blocksize <= end) {
+        printf("%llu\n", curblock);
+        struct extent * cur = NULL;
+        if(offset != curblock || end - curblock < e.blocksize) {
+            res = resolve_extent(&e, curblock, curblock + e.blocksize, &cur);
+            if(res != 0)
+                goto cleanup;
+        }
+
+        if(!cur) {
+            cur = new_extent(&e);
+            if(!cur) {
                 res = -ENOMEM;
                 goto cleanup;
             }
-            n->size = EXTENT_SIZE;
-            n->start = offset;
-            memcpy(&n->inode, &e.oid, sizeof(bson_oid_t));
-            memcpy(n->data, block, EXTENT_SIZE);
-            n->next = o;
-            o = n;
-            block += tocopy;
-            offset += tocopy;
+            cur->start = curblock;
         }
-        commit_extents(&e, o);
-        free_extents(o);
+
+        cur->next = new;
+        new = cur;
+        tocopy = end - offset;
+        tocopy = tocopy > e.blocksize ? e.blocksize : tocopy;
+
+        if(offset != curblock) {
+            memcpy(cur->data + (offset - curblock), block, tocopy);
+        }
+        else
+            memcpy(cur->data, block, tocopy);
+
+        block += tocopy;
+        offset += tocopy;
+        curblock = compute_start(&e, offset);
+        printf("writing %llu %llu %llu %lu %lld\n",
+            curblock, offset, end, size, curblock / e.blocksize);
     }
 
-    res = resolve_extent(&e, last_block, end, &last, 1);
-    if(res != 0)
-        goto cleanup;
-    if(!last) {
-        last = malloc(sizeof(struct extent));
-        if(!last) {
-            fprintf(stderr, "Error allocating last block!\n");
-            res = -ENOMEM;
-            goto cleanup;
-        }
-        last->start = last_block;
-        memcpy(&last->inode, &e.oid, sizeof(bson_oid_t));
-    }
-
-    memcpy(last->data, block, end - offset);
-    last->size = end - offset;
-    last->next = o;
-
-    res = commit_extents(&e, last);
+    res = commit_extents(&e, new);
     if(res != 0)
         goto cleanup;
     if(end > e.size)
         e.size = end;
     res = commit_inode(&e);
+
 cleanup:
     free_inode(&e);
     free_extents(last);
     if(res != 0)
         return res;
+    else
+        add_block_stat(path, size, 1);
+    printf("Wrote it all okay %lu %d\n", size, res);
     return size;
 }
 

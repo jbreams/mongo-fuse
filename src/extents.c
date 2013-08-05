@@ -10,6 +10,10 @@
 #include <osxfuse/fuse.h>
 
 extern const char * blocks_name;
+extern int blocks_name_len;
+const char * block_suffixes[] = {
+    "4k", "8k", "16k", "32k", "64k", "128k", "256k", "512k", "1m"
+};
 
 void free_extents(struct extent * head) {
     while(head) {
@@ -19,10 +23,50 @@ void free_extents(struct extent * head) {
     }
 }
 
+off_t compute_start(struct inode * e, off_t offset) {
+    return (offset / e->blocksize) * e->blocksize;
+}
+
+void get_block_collection(struct inode * e, char * name) {
+    int i;
+    switch(e->blocksize) {
+        case 4096:
+            i = 0;
+            break;
+        case 8192:
+            i = 1;
+            break;
+        case 16384:
+            i = 2;
+            break;
+        case 32768:
+            i = 3;
+            break;
+        case 65536:
+            i = 4;
+            break;
+        case 132072:
+            i = 5;
+            break;
+        case 262144:
+            i = 6;
+            break;
+        case 524288:
+            i = 7;
+            break;
+        case 1048576:
+            i = 8;
+            break;
+    }
+
+    sprintf(name, "%s_%s", blocks_name, block_suffixes[i]);
+}
+
 int commit_extent(struct inode * ent, struct extent *e) {
     int res;
     bson * doc, cond;
     mongo * conn = get_conn();
+    char blocks_coll[32];
 
     doc = bson_alloc();
     if(!doc)
@@ -32,7 +76,7 @@ int commit_extent(struct inode * ent, struct extent *e) {
     bson_append_oid(doc, "inode", &ent->oid);
     bson_append_long(doc, "start", e->start);
     bson_append_finish_object(doc);
-    bson_append_binary(doc, "data", 0, e->data, e->size);
+    bson_append_binary(doc, "data", 0, e->data, ent->blocksize);
     bson_finish(doc);
 
     bson_init(&cond);
@@ -42,7 +86,9 @@ int commit_extent(struct inode * ent, struct extent *e) {
     bson_append_finish_object(&cond);
     bson_finish(&cond);
 
-    res = mongo_update(conn, blocks_name, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
+    get_block_collection(ent, blocks_coll);
+
+    res = mongo_update(conn, blocks_coll, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
     bson_destroy(doc);
     bson_dealloc(doc);
     bson_destroy(&cond);
@@ -64,55 +110,53 @@ int commit_extents(struct inode * ent, struct extent * e) {
     return 0;
 }
 
+struct extent * new_extent(struct inode * e) {
+    struct extent * n = malloc(sizeof(struct extent) + e->blocksize);
+    if(!n)
+        return NULL;
+    memcpy(&n->inode, &e->oid, sizeof(bson_oid_t));
+    return n;
+}
+
 int resolve_extent(struct inode * e, off_t start,
-    off_t end, struct extent ** realout, int getdata) {
-    bson query, fields;
-    int res, x, count;
-    struct extent * out = NULL;
+    off_t end, struct extent ** realout) {
+    bson query;
+    int res;
+    struct extent * out = NULL, *tail = NULL;
     mongo_cursor curs;
     bson_iterator i;
     bson_type bt;
     const char * key;
-    struct extent * tail = NULL;
     mongo * conn = get_conn();
-
-    start = (start/EXTENT_SIZE)*EXTENT_SIZE;
+    char block_coll[32];
 
     bson_init(&query);
     bson_append_start_object(&query, "$query");
     bson_append_oid(&query, "_id.inode", &e->oid);
-    if(end - start < EXTENT_SIZE) {
+    if(end - start < e->blocksize) {
         bson_append_long(&query, "_id.start", start);
-        count = 1;
     } else {
-        x = end % EXTENT_SIZE;
-        end = ((end / EXTENT_SIZE) + (x?1:0)) * EXTENT_SIZE;
-        count = end - start / EXTENT_SIZE;
+        int mod = end % e->blocksize;
+        end = ((end / e->blocksize) + (mod?1:0)) * e->blocksize;
 
         bson_append_start_object(&query, "_id.start");
         bson_append_long(&query, "$gte", start);
-        bson_append_long(&query, "$lte", end);
+        bson_append_long(&query, "$lt", end);
         bson_append_finish_object(&query);
     }
     bson_append_finish_object(&query);
     bson_append_start_object(&query, "$orderby");
-    bson_append_int(&query, "start", -1);
+    bson_append_int(&query, "_id.start", -1);
     bson_append_finish_object(&query);
     bson_finish(&query);
 
-    mongo_cursor_init(&curs, conn, blocks_name);
+    get_block_collection(e, block_coll);
+
+    mongo_cursor_init(&curs, conn, block_coll);
     mongo_cursor_set_query(&curs, &query);
 
-    if(!getdata) {
-        bson_init(&fields);
-        bson_append_int(&fields, "data", 0);
-        bson_finish(&fields);
-        mongo_cursor_set_fields(&curs, &fields);
-    }
-
     while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
-        out = malloc(sizeof(struct extent));
-        memset(out, 0, sizeof(struct extent));
+        out = new_extent(e);
         out->next = tail;
         tail = out;
 
@@ -126,23 +170,22 @@ int resolve_extent(struct inode * e, off_t start,
                 bson_iterator_subiterator(&i, &sub);
                 while(bson_iterator_next(&sub)) {
                     key = bson_iterator_key(&sub);
-                    if(strcmp(key, "inode") == 0)
-                        memcpy(&out->inode, bson_iterator_oid(&i), sizeof(bson_oid_t));
-                    else if(strcmp(key, "start") == 0)
+                    if(strcmp(key, "start") == 0) {
                         out->start = bson_iterator_long(&sub);
+                        break;
+                    }
                 }
             }
             else if(strcmp(key, "data") == 0) {
-                out->size = bson_iterator_bin_len(&i);
+                size_t size = bson_iterator_bin_len(&i);
                 memcpy(out->data,
-                    bson_iterator_bin_data(&i), out->size);
+                    bson_iterator_bin_data(&i), size);
             }
         }
     }
 
     bson_destroy(&query);
-    if(!getdata)
-        bson_destroy(&fields);
+
     if(curs.err != MONGO_CURSOR_EXHAUSTED) {
         fprintf(stderr, "Error getting extents %d", curs.err);
         free(out);
@@ -150,7 +193,6 @@ int resolve_extent(struct inode * e, off_t start,
     }
 
     *realout = out;
-
     return 0;
 }
 

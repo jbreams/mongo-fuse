@@ -1,13 +1,11 @@
 
-#define EXTENT_SIZE 262144
 #define FUSE_USE_VERSION 26
 
 struct extent {
     struct extent * next;
     bson_oid_t inode;
-    uint32_t size;
     uint64_t start;
-    char data[EXTENT_SIZE];
+    char data[1];
 };
 
 struct dirent {
@@ -39,7 +37,9 @@ void set_last_extent(struct extent * e);
 struct extent * get_last_extent();
 mongo * get_conn();
 void setup_threading();
+void teardown_threading();
 void add_block_stat(const char * path, size_t size, int write);
+uint32_t round_up_pow2(uint32_t v);
 
 void free_inode(struct inode *e);
 int get_inode(const char * path, struct inode * out, int getdata);
@@ -47,9 +47,12 @@ int commit_inode(struct inode * e);
 int create_inode(const char * path, mode_t mode, const char * data);
 int check_access(struct inode * e, int amode);
 int read_inode(const bson * doc, struct inode * out);
+int fill_data(struct inode * e);
 
 int commit_extents(struct inode * ent, struct extent *e);
 int resolve_extent(struct inode * e, off_t start,
-    off_t end, struct extent ** realout, int getdata);
+    off_t end, struct extent ** realout);
 void free_extents(struct extent * head);
-
+void get_block_collection(struct inode * e, char * name);
+struct extent * new_extent(struct inode * e);
+off_t compute_start(struct inode * e, off_t offset);
