@@ -32,9 +32,6 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     if(offset > e.size)
         return 0;
 
-
-    /*
-
     if(offset < e.blocksize) {
         if((res = fill_data(&e)) != 0) {
             free_inode(&e);
@@ -52,7 +49,6 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         add_block_stat(path, size, 0);
         return tocopy;
     }
-*/
 
     res = resolve_extent(&e, compute_start(&e, offset), offset + size, &o);
     if(res != 0) {
@@ -109,10 +105,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
     if(e.mode & S_IFDIR)
         return -EISDIR;
 
-    /*
-
     if(offset < e.blocksize) {
-        printf("Writing to first block\n");
         if((res = fill_data(&e)) != 0) {
             free_inode(&e);
             return res;
@@ -133,7 +126,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
         free_inode(&e);
         add_block_stat(path, size, 1);
         return size;
-    }*/
+    }
 
     curblock = compute_start(&e, offset);
     while(offset < end) {

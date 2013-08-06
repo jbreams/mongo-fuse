@@ -89,7 +89,16 @@ int fill_data(struct inode * e) {
     bson_iterator_init(&i, &doc);
     bt = bson_iterator_next(&i);
 
-    e->data = malloc(e->blocksize);
+    if(e->data) {
+        char * newdata = realloc(e->data, e->blocksize);
+        if(!newdata) {
+            bson_destroy(&doc);
+            return -ENOMEM;
+        }
+        e->data = newdata;
+    }
+    else
+        e->data = malloc(e->blocksize);
     if(e->data == NULL) {
         bson_destroy(&doc);
         return -ENOMEM;
