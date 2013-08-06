@@ -340,7 +340,7 @@ static int mongo_unlink(const char * path) {
             c = c->next;
         }
         if(!l)
-            e.dirents = c;
+            e.dirents = c->next;
         else
             l->next = c->next;
         free(c);

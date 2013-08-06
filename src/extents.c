@@ -115,6 +115,7 @@ struct extent * new_extent(struct inode * e) {
     struct extent * n = malloc(sizeof(struct extent) + e->blocksize);
     if(!n)
         return NULL;
+    memset(n, 0, sizeof(struct extent) + e->blocksize);
     memcpy(&n->inode, &e->oid, sizeof(bson_oid_t));
     return n;
 }

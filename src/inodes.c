@@ -181,22 +181,6 @@ int read_inode(const bson * doc, struct inode * out) {
         }
     }
 
-    if(out->blocksize > 0) {
-        if(out->data) {
-            char * newdata = realloc(out->data, out->blocksize);
-            if(!newdata) {
-                free_inode(out);
-                return -ENOMEM;
-            }
-            out->data = newdata;
-        }
-        else
-            out->data = malloc(out->blocksize);
-        if(!out->data) {
-            free_inode(out);
-            return -ENOMEM;
-        }
-    }
     return 0;
 }
 
@@ -275,8 +259,6 @@ int choose_block_size(const char * path, size_t len) {
     int blocksize = 0, res;
     char *parentpath = strdup(path), *ppl = (char*)parentpath + len;
     struct inode parent;
-
-    return 65536;
 
     while(blocksize == 0 && ppl - path > 1) {
         while(*ppl != '/') ppl--;
