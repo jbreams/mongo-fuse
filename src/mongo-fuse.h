@@ -28,6 +28,7 @@ struct inode {
     uint32_t blocksize;
     uint64_t reads[8];
     uint64_t writes[8];
+    uint8_t locked;
     size_t datalen;
     char * data;
 };
@@ -48,6 +49,7 @@ int create_inode(const char * path, mode_t mode, const char * data);
 int check_access(struct inode * e, int amode);
 int read_inode(const bson * doc, struct inode * out);
 int fill_data(struct inode * e);
+int lock_inode(struct inode * e, int level);
 
 int commit_extents(struct inode * ent, struct extent *e);
 int resolve_extent(struct inode * e, off_t start,

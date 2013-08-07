@@ -149,6 +149,8 @@ int read_inode(const bson * doc, struct inode * out) {
             out->dev = bson_iterator_long(&i);
         else if(strcmp(key, "blocksize") == 0)
             out->blocksize = bson_iterator_int(&i);
+        else if(strcmp(key, "locked") == 0)
+            out->locked = bson_iterator_int(&i);
         else if(strcmp(key, "data") == 0) {
             if(bt == BSON_STRING) {
                 out->datalen = bson_iterator_string_len(&i);
@@ -349,3 +351,59 @@ void free_inode(struct inode *e) {
     }
 }
 
+int lock_inode(struct inode * e, int level) {
+    bson cmd, doc;
+    mongo * conn = get_conn();
+    bson_iterator i;
+    bson_type bt;
+    const char * key = NULL;
+    time_t locktime;
+    int res;
+
+    bson_init(&cmd);
+    bson_append_string(&cmd, "findAndModify", "inodes");
+    bson_append_start_object(&cmd, "query");
+    bson_append_oid(&cmd, "_id", &e->oid);
+    bson_append_start_object(&cmd, "locked");
+    bson_append_int(&cmd, "$lt", level + 1);
+    bson_append_finish_object(&cmd);
+    bson_append_finish_object(&cmd);
+
+    bson_append_start_object(&cmd, "update");
+    bson_append_start_object(&cmd, "$set");
+    bson_append_int(&cmd, "locked", level);
+    bson_append_finish_object(&cmd);
+    bson_append_finish_object(&cmd);
+
+    bson_append_start_object(&cmd, "fields");
+    bson_append_int(&cmd, "locked", 1);
+    bson_append_int(&cmd, "_id", 0);
+    bson_append_finish_object(&cmd);
+
+    bson_append_finish_object(&cmd);
+    bson_finish(&cmd);
+
+    bson_print(&cmd);
+    locktime = time(NULL);
+    res = mongo_run_command(conn, "test", &cmd, &doc);
+    bson_destroy(&cmd);
+    if(res != MONGO_OK)
+        return -EIO;
+
+    bson_iterator_init(&i, &doc);
+    while((bt = bson_iterator_next(&i)) != 0) {
+        key = bson_iterator_key(&i);
+        if(strcmp(key, "value") == 0)
+            break;
+    }
+
+    if(bt == BSON_OBJECT) {
+        bson_destroy(&doc);
+        return 0;
+    }
+
+    bson_print(&doc);
+    bson_destroy(&doc);
+    return 0;
+
+}
