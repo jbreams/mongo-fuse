@@ -49,7 +49,10 @@ int create_inode(const char * path, mode_t mode, const char * data);
 int check_access(struct inode * e, int amode);
 int read_inode(const bson * doc, struct inode * out);
 int fill_data(struct inode * e);
-int lock_inode(struct inode * e, int level);
+#if FUSE_VERSION > 28
+int lock_inode(struct inode * e, int writer, bson_date_t * locktime, int noblock);
+int unlock_inode(struct inode * e, int writer, bson_date_t locktime);
+#endif
 
 int commit_extents(struct inode * ent, struct extent *e);
 int resolve_extent(struct inode * e, off_t start,

@@ -40,6 +40,8 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         size_t sizediff = e.blocksize - offset;
         tocopy = size > sizediff ? sizediff : size;
         memcpy(block, e.data + offset, tocopy);
+        fprintf(stderr, "Read %lu bytes at %llu offset: block \"%s\" e.data \"%s\"\n",
+            tocopy, offset, buf, e.data);
         offset += tocopy;
         block += tocopy;
     }
@@ -51,10 +53,6 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     }
 
     res = resolve_extent(&e, compute_start(&e, offset), offset + size, &o);
-    if(res != 0) {
-        free_inode(&e);
-        return res;
-    }
 
     el = o;
     while(block - buf != size) {
@@ -107,6 +105,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
 
     if(offset < e.blocksize) {
         if((res = fill_data(&e)) != 0) {
+            fprintf(stderr, "Error filling in data for %s\n", path);
             free_inode(&e);
             return res;
         }
@@ -121,7 +120,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
     e.modified = time(NULL);
     if(offset == end) {
         if(end > e.size)
-            e.size += tocopy;
+            e.size = offset;
         commit_inode(&e);
         free_inode(&e);
         add_block_stat(path, size, 1);
@@ -136,14 +135,17 @@ int mongo_write(const char *path, const char *buf, size_t size,
 
         if(offset != curblock || end - curblock < e.blocksize) {
             res = resolve_extent(&e, curblock, curblock + e.blocksize, &cur);
-            if(res != 0)
+            if(res != 0) {
+                fprintf(stderr, "Error resolving extent at %llu for %s\n", curblock, path);
                 goto cleanup;
+            }
         }
 
         if(!cur) {
             cur = new_extent(&e);
             if(!cur) {
                 res = -ENOMEM;
+                fprintf(stderr, "Error allocating extent at %llu for %s\n", curblock, path);
                 goto cleanup;
             }
             cur->start = curblock;

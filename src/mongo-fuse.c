@@ -21,6 +21,7 @@
 
 char * blocks_name = "test.blocks";
 char * inodes_name = "test.inodes";
+char * locks_name = "test.locks";
 char * inodes_coll = "inodes";
 char * dbname = "test";
 const char * mongo_host = "127.0.0.1";
@@ -257,7 +258,8 @@ static int do_trunc(struct inode * e, off_t off) {
 
     if(off > e->size) {
         e->size = off;
-        return commit_inode(e);
+        res = commit_inode(e);
+        return res;
     }
 
     bson_init(&cond);
@@ -280,6 +282,7 @@ static int do_trunc(struct inode * e, off_t off) {
     get_block_collection(e, blocks_coll);
     res = mongo_remove(conn, blocks_coll, &cond, NULL);
     bson_destroy(&cond);
+
     if(res != MONGO_OK) {
         fprintf(stderr, "Error truncating blocks\n");
         return -EIO;
@@ -440,6 +443,33 @@ static int mongo_access(const char * path, int amode) {
     return res;
 }
 
+#if FUSE_VERSION > 28
+static int mongo_flock(const char * path, struct fuse_file_info * fi, int op) {
+    struct inode e;
+    int res;
+
+    if((res = get_inode(path, &e, 0)) != 0)
+        return res;
+
+    bson_date_t time;
+    int write;
+    if(op & LOCK_UN) {
+        time = fi->lock_owner & 0x7FFFFFFFFFFFFFFF;
+        write = (fi->lock_owner & 0x8000000000000000) >> 63;
+        res = unlock_inode(&e, write, time);
+        free_inode(&e);
+        return res;
+    }
+    write = op & LOCK_EX;
+    res = lock_inode(&e, write, &time, op & LOCK_NB);
+    free_inode(&e);
+    if(res != 0)
+        return res;
+    fi->lock_owner = ((uint64_t)time) | ((uint64_t)write << 63);
+    return 0;
+}
+#endif
+
 static struct fuse_operations mongo_oper = {
     .getattr    = mongo_getattr,
     .readdir    = mongo_readdir,
@@ -458,7 +488,10 @@ static struct fuse_operations mongo_oper = {
     .rename     = mongo_rename,
     .access     = mongo_access,
     .symlink    = mongo_symlink,
-    .readlink   = mongo_readlink
+    .readlink   = mongo_readlink,
+#if FUSE_VERSION > 28
+    .flock      = mongo_flock
+#endif
 };
 
 int main(int argc, char *argv[])

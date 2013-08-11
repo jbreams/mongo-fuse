@@ -6,56 +6,55 @@
 #include <stdlib.h>
 #include <search.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/file.h>
+#include <time.h>
 #include "mongo-fuse.h"
 #include <osxfuse/fuse.h>
 
 extern const char * inodes_name;
+extern const char * locks_name;
 extern mongo conn;
 
 int commit_inode(struct inode * e) {
-    bson cond, *doc;
+    bson cond, doc;
     mongo * conn = get_conn();
     char istr[4];
     struct dirent * cde = e->dirents;
     int res;
 
-    doc = bson_alloc();
-    if(!doc)
-        return -ENOMEM;
-
-    bson_init(doc);
-    bson_append_start_object(doc, "$set");
-    bson_append_start_array(doc, "dirents");
+    bson_init(&doc);
+    bson_append_start_object(&doc, "$set");
+    bson_append_start_array(&doc, "dirents");
     res = 0;
     while(cde) {
         bson_numstr(istr, res++);
-        bson_append_string(doc, istr, cde->path);
+        bson_append_string(&doc, istr, cde->path);
         cde = cde->next;
     }
-    bson_append_finish_array(doc);
+    bson_append_finish_array(&doc);
 
-    bson_append_int(doc, "mode", e->mode);
-    bson_append_long(doc, "owner", e->owner);
-    bson_append_long(doc, "group", e->group);
-    bson_append_long(doc, "size", e->size);
-    bson_append_int(doc, "blocksize", e->blocksize);
+    bson_append_int(&doc, "mode", e->mode);
+    bson_append_long(&doc, "owner", e->owner);
+    bson_append_long(&doc, "group", e->group);
+    bson_append_long(&doc, "size", e->size);
+    bson_append_int(&doc, "blocksize", e->blocksize);
     if(e->dev > 0)
-        bson_append_long(doc, "dev", e->dev);
-    bson_append_time_t(doc, "created", e->created);
-    bson_append_time_t(doc, "modified", e->modified);
+        bson_append_long(&doc, "dev", e->dev);
+    bson_append_time_t(&doc, "created", e->created);
+    bson_append_time_t(&doc, "modified", e->modified);
     if(e->data && e->datalen > 0)
-        bson_append_binary(doc, "data", 0, e->data, e->datalen);
-    bson_append_finish_object(doc);
-    bson_finish(doc);
+        bson_append_binary(&doc, "data", 0, e->data, e->datalen);
+    bson_append_finish_object(&doc);
+    bson_finish(&doc);
 
     bson_init(&cond);
     bson_append_oid(&cond, "_id", &e->oid);
     bson_finish(&cond);
 
-    res = mongo_update(conn, inodes_name, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
+    res = mongo_update(conn, inodes_name, &cond, &doc, MONGO_UPDATE_UPSERT, NULL);
     bson_destroy(&cond);
-    bson_destroy(doc);
-    bson_dealloc(doc);
+    bson_destroy(&doc);
     if(res != MONGO_OK) {
         fprintf(stderr, "Error committing inode\n");
         return -EIO;
@@ -83,26 +82,22 @@ int fill_data(struct inode * e) {
     bson_destroy(&query);
     bson_destroy(&fields);
 
-    if(res != MONGO_OK)
+    if(res != MONGO_OK) {
+        fprintf(stderr, "Error retrieving data\n");
         return -EIO;
+    }
 
     bson_iterator_init(&i, &doc);
     bt = bson_iterator_next(&i);
 
-    if(e->data) {
-        char * newdata = realloc(e->data, e->blocksize);
-        if(!newdata) {
-            bson_destroy(&doc);
-            return -ENOMEM;
-        }
-        e->data = newdata;
-    }
-    else
-        e->data = malloc(e->blocksize);
+    if(e->data)
+        free(e->data);
+    e->data = malloc(e->blocksize);
     if(e->data == NULL) {
         bson_destroy(&doc);
         return -ENOMEM;
     }
+    memset(e->data, 0, e->blocksize);
 
     if(bt == 0 || strcmp(bson_iterator_key(&i), "data") != 0) {
         e->datalen = 0;
@@ -351,59 +346,157 @@ void free_inode(struct inode *e) {
     }
 }
 
-int lock_inode(struct inode * e, int level) {
-    bson cmd, doc;
-    mongo * conn = get_conn();
+#if FUSE_VERSION > 28
+void read_lock(const bson * b, int * nr, int * nw) {
     bson_iterator i;
     bson_type bt;
-    const char * key = NULL;
-    time_t locktime;
-    int res;
+    const char * key;
+    int writer = 0, added = 0;
 
-    bson_init(&cmd);
-    bson_append_string(&cmd, "findAndModify", "inodes");
-    bson_append_start_object(&cmd, "query");
-    bson_append_oid(&cmd, "_id", &e->oid);
-    bson_append_start_object(&cmd, "locked");
-    bson_append_int(&cmd, "$lt", level + 1);
-    bson_append_finish_object(&cmd);
-    bson_append_finish_object(&cmd);
-
-    bson_append_start_object(&cmd, "update");
-    bson_append_start_object(&cmd, "$set");
-    bson_append_int(&cmd, "locked", level);
-    bson_append_finish_object(&cmd);
-    bson_append_finish_object(&cmd);
-
-    bson_append_start_object(&cmd, "fields");
-    bson_append_int(&cmd, "locked", 1);
-    bson_append_int(&cmd, "_id", 0);
-    bson_append_finish_object(&cmd);
-
-    bson_append_finish_object(&cmd);
-    bson_finish(&cmd);
-
-    bson_print(&cmd);
-    locktime = time(NULL);
-    res = mongo_run_command(conn, "test", &cmd, &doc);
-    bson_destroy(&cmd);
-    if(res != MONGO_OK)
-        return -EIO;
-
-    bson_iterator_init(&i, &doc);
+    bson_iterator_init(&i, b);
     while((bt = bson_iterator_next(&i)) != 0) {
         key = bson_iterator_key(&i);
-        if(strcmp(key, "value") == 0)
+        if(strcmp(key, "_id") == 0) {
+            bson_iterator sub;
+            bson_iterator_subiterator(&i, &sub);
+            while((bt = bson_iterator_next(&sub)) != 0) {
+                key = bson_iterator_key(&sub);
+                if(strcmp(key, "acquire") == 0){
+                    added = bson_iterator_bool(&sub);
+                }
+            }
+        }
+        else if(strcmp(key, "writer") == 0)
+            writer = bson_iterator_bool(&i);
+    }
+    if(writer)
+        *nw += added ? 1 : -1;
+    else
+        *nr += added ? 1 : -1;
+}
+
+int unlock_inode(struct inode * e, int writer, bson_date_t locktime) {
+    bson doc;
+    mongo * conn = get_conn();
+    int res;
+
+    bson_init(&doc);
+    bson_append_start_object(&doc, "_id");
+    bson_append_date(&doc, "time", locktime);
+    bson_append_oid(&doc, "inode", &e->oid);
+    bson_append_bool(&doc, "acquire", 0);
+    bson_append_finish_object(&doc);
+    bson_append_bool(&doc, "writer", writer);
+    bson_finish(&doc);
+
+    res = mongo_insert(conn, locks_name, &doc, NULL);
+    bson_destroy(&doc);
+    if(res != MONGO_OK)
+        return -EIO;
+    return 0;
+}
+
+int lock_inode_impl(struct inode * e, int writer,
+    bson_date_t * locktime, int noblock) {
+    bson query, doc;
+    mongo * conn = get_conn();
+    mongo_cursor curs;
+    int res, nreaders = 0, nwriters = 0, nrecs = 0, nrecs2 = 0;
+    struct timeval tv;
+
+    gettimeofday(&tv, NULL);
+    *locktime = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+
+    bson_init(&doc);
+    bson_append_start_object(&doc, "_id");
+    bson_append_date(&doc, "time", *locktime);
+    bson_append_oid(&doc, "inode", &e->oid);
+    bson_append_bool(&doc, "acquire", 1);
+    bson_append_finish_object(&doc);
+    bson_append_bool(&doc, "writer", writer);
+    bson_finish(&doc);
+
+    res = mongo_insert(conn, locks_name, &doc, NULL);
+    bson_destroy(&doc);
+    if(res != MONGO_OK) {
+        if(conn->lasterrcode == 11000)
+            return -EAGAIN;
+        return -EIO;
+    }
+
+    bson_init(&query);
+    bson_append_start_object(&query, "$query");
+    bson_append_oid(&query, "_id.inode", &e->oid);
+    bson_append_start_object(&query, "_id.time");
+    bson_append_date(&query, "$lt", *locktime);
+    bson_append_finish_object(&query);
+    bson_append_finish_object(&query);
+    bson_append_start_object(&query, "$orderby");
+    bson_append_int(&query, "$natural", 1);
+    bson_append_finish_object(&query);
+    bson_finish(&query);
+
+    mongo_cursor_init(&curs, conn, locks_name);
+    mongo_cursor_set_query(&curs, &query);
+
+    while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
+        const bson * curbson = mongo_cursor_bson(&curs);
+        read_lock(curbson, &nreaders, &nwriters);
+        nrecs++;
+    }
+
+    mongo_cursor_destroy(&curs);
+    if(writer && nreaders == 0 && nwriters == 0) {
+        bson_destroy(&query);
+        return 0;
+    }
+    else if(!writer && nwriters == 0) {
+        bson_destroy(&query);
+        return 0;
+    }
+    if(nonblock)
+        return -EWOULDBLOCK;
+
+    mongo_cursor_init(&curs, conn, locks_name);
+    mongo_cursor_set_query(&curs, &query);
+    mongo_cursor_set_options(&curs,
+        MONGO_TAILABLE | MONGO_NO_CURSOR_TIMEOUT | MONGO_AWAIT_DATA);
+
+    nreaders = 0;
+    nwriters = 0;
+    while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
+        const bson * curbson = mongo_cursor_bson(&curs);
+        read_lock(curbson, &nreaders, &nwriters);
+        nrecs2++;
+        if(nrecs2 < nrecs)
+            continue;
+
+        if(writer && nreaders == 0 && nwriters == 0)
+            break;
+        else if(!writer && nwriters == 0)
             break;
     }
 
-    if(bt == BSON_OBJECT) {
-        bson_destroy(&doc);
+    bson_destroy(&query);
+    mongo_cursor_destroy(&curs);
+
+    if(res == MONGO_OK)
         return 0;
-    }
-
-    bson_print(&doc);
-    bson_destroy(&doc);
-    return 0;
-
+    return -EIO;
 }
+
+int lock_inode(struct inode * e, int writer, bson_date_t * locktime, int noblock) {
+    int res;
+    while(1) {
+        res = lock_inode_impl(e, writer, locktime, noblock);
+        if(res == -EAGAIN) {
+            struct timespec ts;
+            ts.tv_sec = 0;
+            ts.tv_nsec = 10000000;
+            nanosleep(&ts, NULL);
+        }
+        else
+            return res;
+    }
+}
+#endif
