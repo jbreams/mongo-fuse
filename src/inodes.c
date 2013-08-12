@@ -208,6 +208,9 @@ int get_inode(const char * path, struct inode * out, int getdata) {
     res = mongo_find_one(conn, inodes_name, &query,
         getdata ? bson_shared_empty():&fields, &doc);
 
+    if(!getdata)
+        bson_destroy(&fields);
+
     if(res != MONGO_OK) {
         bson_destroy(&query);
         return -ENOENT;

@@ -65,20 +65,17 @@ void get_block_collection(struct inode * e, char * name) {
 
 int commit_extent(struct inode * ent, struct extent *e) {
     int res;
-    bson * doc, cond;
+    bson doc, cond;
     mongo * conn = get_conn();
     char blocks_coll[32];
 
-    doc = bson_alloc();
-    if(!doc)
-        return -ENOMEM;
-    bson_init(doc);
-    bson_append_start_object(doc, "_id");
-    bson_append_oid(doc, "inode", &ent->oid);
-    bson_append_long(doc, "start", e->start);
-    bson_append_finish_object(doc);
-    bson_append_binary(doc, "data", 0, e->data, ent->blocksize);
-    bson_finish(doc);
+    bson_init(&doc);
+    bson_append_start_object(&doc, "_id");
+    bson_append_oid(&doc, "inode", &ent->oid);
+    bson_append_long(&doc, "start", e->start);
+    bson_append_finish_object(&doc);
+    bson_append_binary(&doc, "data", 0, e->data, ent->blocksize);
+    bson_finish(&doc);
 
     bson_init(&cond);
     bson_append_start_object(&cond, "_id");
@@ -89,9 +86,8 @@ int commit_extent(struct inode * ent, struct extent *e) {
 
     get_block_collection(ent, blocks_coll);
 
-    res = mongo_update(conn, blocks_coll, &cond, doc, MONGO_UPDATE_UPSERT, NULL);
-    bson_destroy(doc);
-    bson_dealloc(doc);
+    res = mongo_update(conn, blocks_coll, &cond, &doc, MONGO_UPDATE_UPSERT, NULL);
+    bson_destroy(&doc);
     bson_destroy(&cond);
 
     if(res != MONGO_OK) {
@@ -187,6 +183,7 @@ int resolve_extent(struct inode * e, off_t start,
     }
 
     bson_destroy(&query);
+    mongo_cursor_destroy(&curs);
 
     if(curs.err != MONGO_CURSOR_EXHAUSTED) {
         fprintf(stderr, "Error getting extents %d", curs.err);

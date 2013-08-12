@@ -125,6 +125,7 @@ static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     bson_destroy(&query);
     bson_destroy(&fields);
     free(regexp);
+    mongo_cursor_destroy(&curs);
 
     if(curs.err != MONGO_CURSOR_EXHAUSTED)
         return -EIO;
