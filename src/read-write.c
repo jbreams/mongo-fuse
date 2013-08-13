@@ -72,7 +72,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
     struct inode e;
     int res;
     struct extent * last = NULL, *new = NULL;
-    char * block = (char*)buf;
+    char * block;
     const off_t end = size + offset;
     off_t curblock;
     size_t tocopy;
@@ -82,6 +82,26 @@ int mongo_write(const char *path, const char *buf, size_t size,
 
     if(e.mode & S_IFDIR)
         return -EISDIR;
+
+    if(size > sizeof(uint64_t)) {
+        uint64_t zerocheck;
+        block = ((char*)buf + size) - sizeof(uint64_t);
+        while(block != buf) {
+            zerocheck = *(uint64_t*)block;
+            if(zerocheck != 0)
+                break;
+            block -= (block - buf > sizeof(uint64_t)) ? sizeof(uint64_t):block - buf;
+        }
+        if(zerocheck == 0) {
+            if(end > e.size) {
+                e.size = end;
+                commit_inode(&e);
+                free_inode(&e);
+            }
+            return size;
+        }
+    }
+    block = (char*)buf;
 
     curblock = compute_start(&e, offset);
     while(offset < end) {
