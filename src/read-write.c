@@ -82,7 +82,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
 
     if(e.mode & S_IFDIR)
         return -EISDIR;
-
+/*
     if(size > sizeof(uint64_t)) {
         uint64_t zerocheck;
         block = ((char*)buf + size) - sizeof(uint64_t);
@@ -100,7 +100,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
             }
             return size;
         }
-    }
+    }*/
     block = (char*)buf;
 
     curblock = compute_start(&e, offset);
