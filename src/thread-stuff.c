@@ -15,6 +15,10 @@ struct thread_data {
     int bson_id;
     struct inode lastfile;
     struct extent * lastextent;
+#ifdef HAVE_SNAPPY
+    // See https://code.google.com/p/snappy/source/browse/trunk/snappy.cc#55
+    char compress_buf[1223370];
+#endif
 };
 
 struct block_stat {
@@ -193,6 +197,12 @@ void set_last_extent(struct extent * e) {
     struct thread_data * td = get_thread_data();
     td->lastextent = e;
 }
+
+#ifdef HAVE_SNAPPY
+char * get_compress_buf() {
+    return get_thread_data()->compress_buf;
+}
+#endif
 
 struct mongo * get_conn() {
     struct thread_data * td = get_thread_data();

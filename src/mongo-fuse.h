@@ -29,8 +29,8 @@ struct inode {
     uint64_t reads[8];
     uint64_t writes[8];
     uint8_t locked;
-    size_t datalen;
     char * data;
+    size_t datalen;
 };
 
 struct inode * get_last_file();
@@ -41,14 +41,14 @@ void setup_threading();
 void teardown_threading();
 void add_block_stat(const char * path, size_t size, int write);
 uint32_t round_up_pow2(uint32_t v);
+char * get_compress_buf();
 
 void free_inode(struct inode *e);
-int get_inode(const char * path, struct inode * out, int getdata);
+int get_inode(const char * path, struct inode * out);
 int commit_inode(struct inode * e);
 int create_inode(const char * path, mode_t mode, const char * data);
 int check_access(struct inode * e, int amode);
 int read_inode(const bson * doc, struct inode * out);
-int fill_data(struct inode * e);
 #if FUSE_VERSION > 28
 int lock_inode(struct inode * e, int writer, bson_date_t * locktime, int noblock);
 int unlock_inode(struct inode * e, int writer, bson_date_t locktime);

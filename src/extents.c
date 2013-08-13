@@ -8,6 +8,9 @@
 #include <sys/stat.h>
 #include "mongo-fuse.h"
 #include <osxfuse/fuse.h>
+#ifdef HAVE_SNAPPY
+#include <snappy-c.h>
+#endif
 
 extern const char * blocks_name;
 extern int blocks_name_len;
@@ -70,18 +73,25 @@ int commit_extent(struct inode * ent, struct extent *e) {
     char blocks_coll[32];
 
     bson_init(&doc);
-    bson_append_start_object(&doc, "_id");
     bson_append_oid(&doc, "inode", &ent->oid);
     bson_append_long(&doc, "start", e->start);
-    bson_append_finish_object(&doc);
+#ifdef HAVE_SNAPPY
+    char * comp_out = get_compress_buf();
+    size_t comp_size = snappy_max_compressed_length(ent->blocksize);
+    if((res = snappy_compress(e->data, ent->blocksize,
+        comp_out, &comp_size)) != SNAPPY_OK) {
+        fprintf(stderr, "Error compressing input: %d\n", res);
+        return -EIO;
+    }
+    bson_append_binary(&doc, "data", 0, comp_out, comp_size);
+#else
     bson_append_binary(&doc, "data", 0, e->data, ent->blocksize);
+#endif
     bson_finish(&doc);
 
     bson_init(&cond);
-    bson_append_start_object(&cond, "_id");
     bson_append_oid(&cond, "inode", &ent->oid);
     bson_append_long(&cond, "start", e->start);
-    bson_append_finish_object(&cond);
     bson_finish(&cond);
 
     get_block_collection(ent, blocks_coll);
@@ -130,21 +140,21 @@ int resolve_extent(struct inode * e, off_t start,
 
     bson_init(&query);
     bson_append_start_object(&query, "$query");
-    bson_append_oid(&query, "_id.inode", &e->oid);
+    bson_append_oid(&query, "inode", &e->oid);
     if(end - start < e->blocksize) {
-        bson_append_long(&query, "_id.start", start);
+        bson_append_long(&query, "start", start);
     } else {
         int mod = end % e->blocksize;
         end = ((end / e->blocksize) + (mod?1:0)) * e->blocksize;
 
-        bson_append_start_object(&query, "_id.start");
+        bson_append_start_object(&query, "start");
         bson_append_long(&query, "$gte", start);
         bson_append_long(&query, "$lt", end);
         bson_append_finish_object(&query);
     }
     bson_append_finish_object(&query);
     bson_append_start_object(&query, "$orderby");
-    bson_append_int(&query, "_id.start", -1);
+    bson_append_int(&query, "start", -1);
     bson_append_finish_object(&query);
     bson_finish(&query);
 
@@ -160,24 +170,26 @@ int resolve_extent(struct inode * e, off_t start,
 
         const bson * curbson = mongo_cursor_bson(&curs);
         bson_iterator_init(&i, curbson);
+        bson_print(curbson);
 
         while((bt = bson_iterator_next(&i)) > 0) {
             key = bson_iterator_key(&i);
-            if(strcmp(key, "_id") == 0) {
-                bson_iterator sub;
-                bson_iterator_subiterator(&i, &sub);
-                while(bson_iterator_next(&sub)) {
-                    key = bson_iterator_key(&sub);
-                    if(strcmp(key, "start") == 0) {
-                        out->start = bson_iterator_long(&sub);
-                        break;
-                    }
-                }
-            }
+            if(strcmp(key, "start") == 0)
+                out->start = bson_iterator_long(&i);
             else if(strcmp(key, "data") == 0) {
                 size_t size = bson_iterator_bin_len(&i);
+#ifdef HAVE_SNAPPY
+                size_t outsize = e->blocksize;
+                if((res = snappy_uncompress(bson_iterator_bin_data(&i),
+                    size, out->data, &outsize)) != SNAPPY_OK) {
+                    fprintf(stderr, "Error uncompressing block %d\n", res);
+                    free(out);
+                    return -EIO;
+                }
+#else
                 memcpy(out->data,
                     bson_iterator_bin_data(&i), size);
+#endif
             }
         }
     }

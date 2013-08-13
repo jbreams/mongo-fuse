@@ -44,7 +44,7 @@ int commit_inode(struct inode * e) {
     bson_append_time_t(&doc, "created", e->created);
     bson_append_time_t(&doc, "modified", e->modified);
     if(e->data && e->datalen > 0)
-        bson_append_binary(&doc, "data", 0, e->data, e->datalen);
+        bson_append_string_n(&doc, "data", e->data, e->datalen);
     bson_append_finish_object(&doc);
     bson_finish(&doc);
 
@@ -59,61 +59,6 @@ int commit_inode(struct inode * e) {
         fprintf(stderr, "Error committing inode\n");
         return -EIO;
     }
-    return 0;
-}
-
-int fill_data(struct inode * e) {
-    bson query, doc, fields;
-    mongo * conn = get_conn();
-    bson_iterator i;
-    bson_type bt;
-    int res;
-
-    bson_init(&query);
-    bson_append_oid(&query, "_id", &e->oid);
-    bson_finish(&query);
-
-    bson_init(&fields);
-    bson_append_int(&fields, "data", 1);
-    bson_append_int(&fields, "_id", 0);
-    bson_finish(&fields);
-
-    res = mongo_find_one(conn, inodes_name, &query, &fields, &doc);
-    bson_destroy(&query);
-    bson_destroy(&fields);
-
-    if(res != MONGO_OK) {
-        fprintf(stderr, "Error retrieving data\n");
-        return -EIO;
-    }
-
-    bson_iterator_init(&i, &doc);
-    bt = bson_iterator_next(&i);
-
-    if(e->data)
-        free(e->data);
-    e->data = malloc(e->blocksize);
-    if(e->data == NULL) {
-        bson_destroy(&doc);
-        return -ENOMEM;
-    }
-    memset(e->data, 0, e->blocksize);
-
-    if(bt == 0 || strcmp(bson_iterator_key(&i), "data") != 0) {
-        e->datalen = 0;
-        bson_destroy(&doc);
-        return 0;
-    }
-
-    if(bt == BSON_STRING) {
-        e->datalen = bson_iterator_string_len(&i);
-        strcpy(e->data, bson_iterator_string(&i));
-    } else if(bt == BSON_BINDATA) {
-        e->datalen = bson_iterator_bin_len(&i);
-        memcpy(e->data, bson_iterator_bin_data(&i), e->datalen);
-    }
-
-    bson_destroy(&doc);
     return 0;
 }
 
@@ -147,15 +92,9 @@ int read_inode(const bson * doc, struct inode * out) {
         else if(strcmp(key, "locked") == 0)
             out->locked = bson_iterator_int(&i);
         else if(strcmp(key, "data") == 0) {
-            if(bt == BSON_STRING) {
-                out->datalen = bson_iterator_string_len(&i);
-                out->data = malloc(out->datalen + 1);
-                strcpy(out->data, bson_iterator_string(&i));
-            } else if(bt == BSON_BINDATA) {
-                out->datalen = bson_iterator_bin_len(&i);
-                out->data = malloc(out->datalen);
-                memcpy(out->data, bson_iterator_bin_data(&i), out->datalen);
-            }
+            out->datalen = bson_iterator_string_len(&i);
+            out->data = malloc(out->datalen + 1);
+            strcpy(out->data, bson_iterator_string(&i));
         }
         else if(strcmp(key, "dirents") == 0) {
             bson_iterator_subiterator(&i, &sub);
@@ -190,8 +129,8 @@ int read_inode(const bson * doc, struct inode * out) {
     return 0;
 }
 
-int get_inode(const char * path, struct inode * out, int getdata) {
-    bson query, doc, fields;
+int get_inode(const char * path, struct inode * out) {
+    bson query, doc;
     int res;
     mongo * conn = get_conn();
 
@@ -199,17 +138,8 @@ int get_inode(const char * path, struct inode * out, int getdata) {
     bson_append_string(&query, "dirents", path);
     bson_finish(&query);
 
-    if(!getdata) {
-        bson_init(&fields);
-        bson_append_int(&fields, "data", 0);
-        bson_finish(&fields);
-    }
-
     res = mongo_find_one(conn, inodes_name, &query,
-        getdata ? bson_shared_empty():&fields, &doc);
-
-    if(!getdata)
-        bson_destroy(&fields);
+         bson_shared_empty(), &doc);
 
     if(res != MONGO_OK) {
         bson_destroy(&query);
@@ -274,7 +204,7 @@ int choose_block_size(const char * path, size_t len) {
         if(ppl - path > 0)
             *ppl = '\0';
 
-        res = get_inode(parentpath, &parent, 0);
+        res = get_inode(parentpath, &parent);
         if(res != 0 || !(parent.mode & S_IFDIR)) {
             free_inode(&parent);
             free(parentpath);
@@ -297,7 +227,7 @@ int create_inode(const char * path, mode_t mode, const char * data) {
     const struct fuse_context * fcx = fuse_get_context();
     int res, blocksize;
 
-    res = get_inode(path, &e, 0);
+    res = get_inode(path, &e);
     if(res == 0) {
         free_inode(&e);
         return -EEXIST;

@@ -23,7 +23,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     size_t tocopy;
     const off_t end = size + offset;
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     if(e.mode & S_IFDIR)
@@ -31,26 +31,6 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
 
     if(offset > e.size)
         return 0;
-
-    if(offset < e.blocksize) {
-        if((res = fill_data(&e)) != 0) {
-            free_inode(&e);
-            return res;
-        }
-        size_t sizediff = e.blocksize - offset;
-        tocopy = size > sizediff ? sizediff : size;
-        memcpy(block, e.data + offset, tocopy);
-        fprintf(stderr, "Read %lu bytes at %llu offset: block \"%s\" e.data \"%s\"\n",
-            tocopy, offset, buf, e.data);
-        offset += tocopy;
-        block += tocopy;
-    }
-
-    if(block - buf == size) {
-        free_inode(&e);
-        add_block_stat(path, size, 0);
-        return tocopy;
-    }
 
     res = resolve_extent(&e, compute_start(&e, offset), offset + size, &o);
 
@@ -97,35 +77,11 @@ int mongo_write(const char *path, const char *buf, size_t size,
     off_t curblock;
     size_t tocopy;
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     if(e.mode & S_IFDIR)
         return -EISDIR;
-
-    if(offset < e.blocksize) {
-        if((res = fill_data(&e)) != 0) {
-            fprintf(stderr, "Error filling in data for %s\n", path);
-            free_inode(&e);
-            return res;
-        }
-        tocopy = e.blocksize - offset;
-        tocopy = size > tocopy ? tocopy : size;
-        memcpy(e.data + offset, block, tocopy);
-        offset += tocopy;
-        block += tocopy;
-        e.datalen += tocopy;
-    }
-
-    e.modified = time(NULL);
-    if(offset == end) {
-        if(end > e.size)
-            e.size = offset;
-        commit_inode(&e);
-        free_inode(&e);
-        add_block_stat(path, size, 1);
-        return size;
-    }
 
     curblock = compute_start(&e, offset);
     while(offset < end) {

@@ -38,7 +38,7 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
     struct inode e;
 
     memset(stbuf, 0, sizeof(struct stat));
-    res = get_inode(path, &e, 0);
+    res = get_inode(path, &e);
     if(res != 0) {
         if(strcmp(path, "/") == 0) {
             stbuf->st_mode = S_IFDIR | 0755;
@@ -142,7 +142,7 @@ static int mongo_rename(const char * path, const char * newpath) {
     const size_t newpathlen = strlen(newpath);
     int res;
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     struct dirent * d = e.dirents;
@@ -172,7 +172,7 @@ static int mongo_open(const char *path, struct fuse_file_info *fi)
     struct inode e;
     int res;
 
-    res = get_inode(path, &e, 0);
+    res = get_inode(path, &e);
     if(res == 0)
         free_inode(&e);
     return res;
@@ -194,7 +194,7 @@ static int mongo_readlink(const char * path, char * out, size_t outlen) {
     struct inode e;
     int res;
 
-    res = get_inode(path, &e, 1);
+    res = get_inode(path, &e);
     if(res != 0) {
         free_inode(&e);
         return res;
@@ -232,7 +232,7 @@ static int mongo_rmdir(const char * path) {
     if(dres > 1)
         return -ENOTEMPTY;
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     bson_init(&cond);
@@ -296,7 +296,7 @@ static int mongo_truncate(const char * path, off_t off) {
     struct inode e;
     int res;
 
-    if((res = get_inode(path, &e, 1)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     res = do_trunc(&e, off);
@@ -309,7 +309,7 @@ static int mongo_link(const char * path, const char * newpath) {
     int res;
     size_t newpathlen = strlen(newpath);
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     if(e.mode & S_IFDIR) {
@@ -334,7 +334,7 @@ static int mongo_unlink(const char * path) {
     mongo * conn = get_conn();
     char blocks_coll[32];
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     if(e.direntcount > 1) {
@@ -385,7 +385,7 @@ static int mongo_chmod(const char * path, mode_t mode) {
     struct inode e;
     int res;
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     e.mode = (e.mode & S_IFMT) | mode;
@@ -399,7 +399,7 @@ static int mongo_chown(const char * path, uid_t user, gid_t group) {
     struct inode e;
     int res;
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     e.owner = user;
@@ -415,7 +415,7 @@ static int mongo_utimens(const char * path, const struct timespec tv[2]) {
     struct inode e;
     int res;
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     if(tv == NULL)
@@ -436,7 +436,7 @@ static int mongo_access(const char * path, int amode) {
     if(fcx->uid == 0)
         return 0;
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     res = check_access(&e, amode) ? -EACCES : 0;
@@ -449,7 +449,7 @@ static int mongo_flock(const char * path, struct fuse_file_info * fi, int op) {
     struct inode e;
     int res;
 
-    if((res = get_inode(path, &e, 0)) != 0)
+    if((res = get_inode(path, &e)) != 0)
         return res;
 
     bson_date_t time;
