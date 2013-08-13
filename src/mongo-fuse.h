@@ -33,9 +33,6 @@ struct inode {
     size_t datalen;
 };
 
-struct inode * get_last_file();
-void set_last_extent(struct extent * e);
-struct extent * get_last_extent();
 mongo * get_conn();
 void setup_threading();
 void teardown_threading();

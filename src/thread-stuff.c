@@ -13,8 +13,6 @@ extern const char * inodes_name;
 struct thread_data {
     mongo conn;
     int bson_id;
-    struct inode lastfile;
-    struct extent * lastextent;
 #ifdef HAVE_SNAPPY
     // See https://code.google.com/p/snappy/source/browse/trunk/snappy.cc#55
     char compress_buf[1223370];
@@ -139,9 +137,6 @@ static void * stats_thread_fn(void * arg) {
 
 void free_thread_data(void* rp) {
     struct thread_data * td = rp;
-    free_inode(&td->lastfile);
-    if(td->lastextent)
-        free_extents(td->lastextent);
     mongo_destroy(&td->conn);
     free(td);
 }
@@ -178,24 +173,6 @@ static struct thread_data * get_thread_data() {
     mongo_init(&td->conn);
     pthread_setspecific(tls_key, td);
     return td;
-}
-
-void clear_last_file() {
-    struct thread_data * td = get_thread_data();
-    memset(&td->lastfile, 0, sizeof(struct inode));
-}
-
-struct inode * get_last_file() {
-    return &get_thread_data()->lastfile;
-}
-
-struct extent * get_last_extent() {
-    return get_thread_data()->lastextent;
-}
-
-void set_last_extent(struct extent * e) {
-    struct thread_data * td = get_thread_data();
-    td->lastextent = e;
 }
 
 #ifdef HAVE_SNAPPY
