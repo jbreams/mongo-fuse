@@ -248,50 +248,6 @@ static int mongo_rmdir(const char * path) {
     return 0;
 }
 
-static int do_trunc(struct inode * e, off_t off) {
-    bson cond;
-    int res;
-    mongo * conn = get_conn();
-    char blocks_coll[32];
-
-    if(e->mode & S_IFDIR)
-        return -EISDIR;
-
-    if(off > e->size) {
-        e->size = off;
-        res = commit_inode(e);
-        return res;
-    }
-
-    bson_init(&cond);
-    bson_append_oid(&cond, "inode", &e->oid);
-
-    if(off <= e->blocksize) {
-        e->size = off;
-        e->datalen = off;
-    } else {
-        size_t start = off / e->blocksize;
-        if(off % e->blocksize != 0)
-            start += e->blocksize;
-        bson_append_start_object(&cond, "start");
-        bson_append_long(&cond, "$gt", start);
-        bson_append_finish_object(&cond);
-    }
-
-    bson_finish(&cond);
-
-    get_block_collection(e, blocks_coll);
-    res = mongo_remove(conn, blocks_coll, &cond, NULL);
-    bson_destroy(&cond);
-
-    if(res != MONGO_OK) {
-        fprintf(stderr, "Error truncating blocks\n");
-        return -EIO;
-    }
-
-    return commit_inode(e);
-}
-
 static int mongo_truncate(const char * path, off_t off) {
     struct inode e;
     int res;
@@ -332,7 +288,6 @@ static int mongo_unlink(const char * path) {
     struct inode e;
     int res;
     mongo * conn = get_conn();
-    char blocks_coll[32];
 
     if((res = get_inode(path, &e)) != 0)
         return res;
@@ -366,19 +321,7 @@ static int mongo_unlink(const char * path) {
         return -EIO;
     }
 
-    bson_init(&cond);
-    bson_append_oid(&cond, "_id.inode", &e.oid);
-    bson_finish(&cond);
-
-    get_block_collection(&e, blocks_coll);
-
-    res = mongo_remove(conn, blocks_coll, &cond, NULL);
-    bson_destroy(&cond);
-    if(res != MONGO_OK) {
-        fprintf(stderr, "Error removing blocks for %s\n", path);
-        return -EIO;
-    }
-    return 0;
+    return do_trunc(&e, 0);
 }
 
 static int mongo_chmod(const char * path, mode_t mode) {

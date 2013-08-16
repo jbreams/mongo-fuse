@@ -9,7 +9,6 @@ extern const char * mongo_host;
 extern int mongo_port;
 extern const char * inodes_name;
 
-
 struct thread_data {
     mongo conn;
     int bson_id;
@@ -17,6 +16,8 @@ struct thread_data {
     // See https://code.google.com/p/snappy/source/browse/trunk/snappy.cc#55
     char compress_buf[1223370];
 #endif
+    size_t cursize;
+    struct extent * extent_buf;
 };
 
 struct block_stat {
@@ -81,7 +82,6 @@ static void * stats_thread_fn(void * arg) {
         block_stat_head = NULL;
         nops = 0;
         pthread_mutex_unlock(&block_stat_mutex);
-        printf("Woke up stats thread!\n");
 
         while(head) {
             bson doc, query;
@@ -173,6 +173,22 @@ static struct thread_data * get_thread_data() {
     mongo_init(&td->conn);
     pthread_setspecific(tls_key, td);
     return td;
+}
+
+struct extent * new_extent(struct inode * e) {
+    struct thread_data * td = get_thread_data();
+    if(e->blocksize > td->cursize) {
+        if(td->extent_buf) {
+            td->extent_buf = NULL;
+            free(td->extent_buf);
+        }
+        td->extent_buf = malloc(sizeof(struct extent) + e->blocksize);
+        if(!td->extent_buf)
+            return NULL;
+        td->cursize = e->blocksize;
+    }
+    memset(td->extent_buf, 0, sizeof(struct extent) + e->blocksize);
+    return td->extent_buf;
 }
 
 #ifdef HAVE_SNAPPY

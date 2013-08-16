@@ -89,8 +89,6 @@ int read_inode(const bson * doc, struct inode * out) {
             out->dev = bson_iterator_long(&i);
         else if(strcmp(key, "blocksize") == 0)
             out->blocksize = bson_iterator_int(&i);
-        else if(strcmp(key, "locked") == 0)
-            out->locked = bson_iterator_int(&i);
         else if(strcmp(key, "data") == 0) {
             out->datalen = bson_iterator_string_len(&i);
             out->data = malloc(out->datalen + 1);
