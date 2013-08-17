@@ -15,7 +15,7 @@
 #include "mongo-fuse.h"
 
 int mongo_read(const char *path, char *buf, size_t size, off_t offset,
-                      struct fuse_file_info *fi) {
+               struct fuse_file_info *fi) {
     struct inode e;
     int res;
     struct extent * o;
@@ -34,7 +34,6 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
 
     while(block - buf != size) {
         start = compute_start(&e, offset);
-        fprintf(stderr, "Resolving block %lu\n", start);
         if((res = resolve_extent(&e, start, &o, 1)) != 0)
             return res;
 
@@ -42,21 +41,18 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         size_t curblocksize = e.blocksize, sizediff = offset - start;
         if(offset > start)
             curblocksize -= sizediff;
-        if(!o) {
-            memset(block, 0, curblocksize);
-            block += curblocksize;
-            continue;
-        } else if(block - buf == 0)
-            elock = o->data + sizediff;
-        else
-            elock = o->data;
-
         if(end - offset < curblocksize)
             tocopy = end - offset;
         else
             tocopy = curblocksize;
+        if(o) {
+            elock = o->data;
+            if(block - buf == 0)
+                elock += sizediff;
+            memcpy(block, elock, tocopy);
+        } else
+            memset(block, 0, tocopy);
 
-        memcpy(block, elock, tocopy);
         block += tocopy;
         offset += tocopy;
     }
@@ -66,7 +62,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 int mongo_write(const char *path, const char *buf, size_t size,
-                       off_t offset, struct fuse_file_info *fi)
+                off_t offset, struct fuse_file_info *fi)
 {
     struct inode e;
     int res;
@@ -87,9 +83,8 @@ int mongo_write(const char *path, const char *buf, size_t size,
         struct extent * cur = NULL;
         int getdata = (offset != curblock || end - curblock < e.blocksize);
         char * elock;
-
         if((res = resolve_extent(&e, curblock, &cur, getdata)) != 0)
-            return res;
+            goto cleanup;
 
         if(!cur) {
             cur = new_extent(&e);

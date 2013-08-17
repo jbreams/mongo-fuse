@@ -8,28 +8,28 @@
 #include <sys/stat.h>
 #include "mongo-fuse.h"
 #include <osxfuse/fuse.h>
-#ifdef HAVE_SNAPPY
 #include <snappy-c.h>
-#endif
 #include "sha1.h"
 
 extern const char * dbname;
 extern const char * blocks_name;
 extern int blocks_name_len;
-const char * block_suffixes[] = {
+static const char * block_suffixes[] = {
     "4k", "8k", "16k", "32k", "64k", "128k", "256k", "512k", "1m"
 };
 
+#pragma pack(1)
 struct inode_id {
     bson_oid_t oid;
     uint64_t start;
 };
+#pragma pack()
 
 off_t compute_start(struct inode * e, off_t offset) {
     return (offset / e->blocksize) * e->blocksize;
 }
 
-void get_block_collection(struct inode * e, char * name) {
+int get_blocksize_index(struct inode * e) {
     int i;
     switch(e->blocksize) {
         case 4096:
@@ -61,7 +61,11 @@ void get_block_collection(struct inode * e, char * name) {
             i = 8;
             break;
     }
+    return i;
+}
 
+void get_block_collection(struct inode * e, char * name) {
+    int i = get_blocksize_index(e);
     sprintf(name, "%s_%s", blocks_name, block_suffixes[i]);
 }
 
@@ -70,10 +74,10 @@ int commit_extent(struct inode * ent, struct extent *e) {
     bson doc, cond;
     mongo * conn = get_conn();
     char blocks_coll[32], *colll = blocks_coll;
-    ssize_t realsize = ent->blocksize;
-    int sum = 0;
-    double count;
+    ssize_t realend = ent->blocksize;
+    double count = 0;
     uint8_t hash[20];
+    uint32_t offset, reallen;
     struct inode_id id;
 
     sha1((uint8_t*)e->data, ent->blocksize, hash);
@@ -102,18 +106,24 @@ int commit_extent(struct inode * ent, struct extent *e) {
             return -EIO;
     }
 
-    bson_init(&cond);
-    bson_append_binary(&cond, "_id", 0, (char*)hash, sizeof(hash));
-    bson_finish(&cond);
+    for(;realend >= 0 && e->data[realend] == '\0'; realend--);
+    realend++;
+    for(offset = 0; offset < realend && e->data[offset] == 0; offset++);
+    offset -= offset > 0 ? 1 : 0;
+    reallen = realend - offset;
 
-    while(*colll != '.') colll++;
-    colll++;
+    if(reallen > 0) {
+        bson_init(&cond);
+        bson_append_binary(&cond, "_id", 0, (char*)hash, sizeof(hash));
+        bson_finish(&cond);
 
-    count = mongo_count(conn, dbname, colll, &cond);
-    bson_destroy(&cond);
+        while(*colll != '.') colll++;
+        colll++;
 
-    for(;realsize >= 0 && sum == 0; realsize--)
-        sum |= e->data[realsize];
+        count = mongo_count(conn, dbname, colll, &cond);
+        bson_destroy(&cond);
+    } else
+        return 0;
 
     bson_init(&doc);
     bson_append_start_object(&doc, "$addToSet");
@@ -121,18 +131,18 @@ int commit_extent(struct inode * ent, struct extent *e) {
     bson_append_finish_object(&doc);
     if(count < 1) {
         bson_append_start_object(&doc, "$set");
-#ifdef HAVE_SNAPPY
-        char * comp_out = get_compress_buf();
-        size_t comp_size = snappy_max_compressed_length(ent->blocksize);
-        if((res = snappy_compress(e->data, ent->blocksize,
-            comp_out, &comp_size)) != SNAPPY_OK) {
-            fprintf(stderr, "Error compressing input: %d\n", res);
-            return -EIO;
-        }
-        bson_append_binary(&doc, "data", 0, comp_out, comp_size);
-#else
-        bson_append_binary(&doc, "data", 0, e->data, ent->blocksize);
-#endif
+        if(reallen > 0) {
+            char * comp_out = get_compress_buf();
+            size_t comp_size = snappy_max_compressed_length(reallen);
+            if((res = snappy_compress(e->data + offset, reallen,
+                comp_out, &comp_size)) != SNAPPY_OK) {
+                fprintf(stderr, "Error compressing input: %d\n", res);
+                return -EIO;
+            }
+            bson_append_binary(&doc, "data", 0, comp_out, comp_size);
+        } else
+            bson_append_null(&doc, "data");
+        bson_append_int(&doc, "offset", offset);
         bson_append_finish_object(&doc);
     }
     bson_finish(&doc);
@@ -183,7 +193,6 @@ int resolve_extent(struct inode * e, off_t start,
     bson_finish(&fields);
 
     get_block_collection(e, block_coll);
-
     mongo_cursor_init(&curs, conn, block_coll);
     mongo_cursor_set_query(&curs, &query);
     mongo_cursor_set_fields(&curs, &fields);
@@ -191,9 +200,11 @@ int resolve_extent(struct inode * e, off_t start,
 
     while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
         const bson * curbson = mongo_cursor_bson(&curs);
-        bson_iterator_init(&i, curbson);
-        bson_print(curbson);
+        size_t outsize = e->blocksize;
+        char * comp_out = get_compress_buf();
+        uint32_t offset;
 
+        bson_iterator_init(&i, curbson);
         while((bt = bson_iterator_next(&i)) > 0) {
             key = bson_iterator_key(&i);
             if(strcmp(key, "_id") == 0) {
@@ -203,20 +214,17 @@ int resolve_extent(struct inode * e, off_t start,
             }
             else if(strcmp(key, "data") == 0) {
                 size_t size = bson_iterator_bin_len(&i);
-#ifdef HAVE_SNAPPY
-                size_t outsize = e->blocksize;
                 if((res = snappy_uncompress(bson_iterator_bin_data(&i),
-                    size, out->data, &outsize)) != SNAPPY_OK) {
+                    size, comp_out, &outsize)) != SNAPPY_OK) {
                     fprintf(stderr, "Error uncompressing block %d\n", res);
                     free(out);
                     return -EIO;
                 }
-#else
-                memcpy(out->data,
-                    bson_iterator_bin_data(&i), size);
-#endif
             }
+            else if(strcmp(key, "offset") == 0)
+                offset = bson_iterator_int(&i);
         }
+        memcpy(&out->data + offset, comp_out, outsize);
     }
 
     bson_destroy(&query);
@@ -229,58 +237,50 @@ int resolve_extent(struct inode * e, off_t start,
         return -EIO;
     }
 
-    fprintf(stderr, "Block %llu: %d\n", start, out->foundhash);
     *realout = out->foundhash ? out : NULL;
     return 0;
 }
 
 int do_trunc(struct inode * e, off_t off) {
     bson cond, doc;
-    int res, i = 0;
+    int res;
     mongo * conn = get_conn();
-    char blocks_coll[32], istr[5];
+    char blocks_coll[32];
     struct inode_id id;
+    off_t moving_off = off > 0 ? compute_start(e, off) + e->blocksize : 0;
 
     if(e->mode & S_IFDIR)
         return -EISDIR;
 
     if(off > e->size) {
         e->size = off;
-        res = commit_inode(e);
-        return res;
+        return 0;
     }
+
+    fprintf(stderr, "Truncating file %llu bytes to %llu\n", e->size, off);
 
     memcpy(&id.oid, &e->oid, sizeof(bson_oid_t));
-    bson_init(&cond);
-    bson_append_start_object(&cond, "refs");
-    bson_append_start_array(&cond, "$in");
-    off = compute_start(e, off);
-    while(off < e->size) {
-        bson_numstr(istr, i++);
-        id.start = off;
-        bson_append_binary(&cond, istr, 0, (char*)&id, sizeof(id));
-    }
-    bson_append_finish_array(&cond);
-    bson_append_finish_object(&cond);
-    bson_finish(&cond);
-
-    bson_init(&doc);
-    bson_append_start_object(&doc, "$pull");
-    bson_append_binary(&doc, "refs", 0, (char*)&id, sizeof(id));
-    bson_append_finish_object(&doc);
-    bson_finish(&doc);
-
     get_block_collection(e, blocks_coll);
-    res = mongo_update(conn, blocks_coll, &cond,
-        &doc, MONGO_UPDATE_MULTI, NULL);
-    bson_destroy(&cond);
-    bson_destroy(&doc);
+    while(moving_off < e->size) {
+        id.start = moving_off;
+        bson_init(&cond);
+        bson_append_binary(&cond, "refs", 0, (char*)&id, sizeof(id));
+        bson_finish(&cond);
 
-    if(res != MONGO_OK) {
-        fprintf(stderr, "Error truncating blocks\n");
-        return -EIO;
+        bson_init(&doc);
+        bson_append_start_object(&doc, "$pull");
+        bson_append_binary(&doc, "refs", 0, (char*)&id, sizeof(id));
+        bson_append_finish_object(&doc);
+        bson_finish(&doc);
+
+        res = mongo_update(conn, blocks_coll, &cond, &doc, 0, NULL);
+        bson_destroy(&doc);
+        bson_destroy(&cond);
+        if(res != MONGO_OK)
+            return -EIO;
+        moving_off += e->blocksize;
     }
-
-    return commit_inode(e);
+    e->size = off;
+    return 0;
 }
 

@@ -12,10 +12,10 @@ extern const char * inodes_name;
 struct thread_data {
     mongo conn;
     int bson_id;
-#ifdef HAVE_SNAPPY
+    // This is a buffer for compression output that should hold the
+    // largest block size plus any overhead from snappy.
     // See https://code.google.com/p/snappy/source/browse/trunk/snappy.cc#55
     char compress_buf[1223370];
-#endif
     size_t cursize;
     struct extent * extent_buf;
 };
@@ -191,11 +191,9 @@ struct extent * new_extent(struct inode * e) {
     return td->extent_buf;
 }
 
-#ifdef HAVE_SNAPPY
 char * get_compress_buf() {
     return get_thread_data()->compress_buf;
 }
-#endif
 
 struct mongo * get_conn() {
     struct thread_data * td = get_thread_data();

@@ -179,7 +179,10 @@ static int mongo_open(const char *path, struct fuse_file_info *fi)
 }
 
 static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * fi) {
-    return create_inode(path, mode, NULL);
+    int res = create_inode(path, mode, NULL);
+    if(res == -EEXIST)
+        return fi->flags & O_EXCL ? res : 0;
+    return res;
 }
 
 static int mongo_mkdir(const char * path, mode_t mode) {
@@ -256,8 +259,13 @@ static int mongo_truncate(const char * path, off_t off) {
         return res;
 
     res = do_trunc(&e, off);
+    if(res != 0) {
+        free_inode(&e);
+        return res;
+    }
+    commit_inode(&e);
     free_inode(&e);
-    return res;
+    return 0;
 }
 
 static int mongo_link(const char * path, const char * newpath) {
@@ -321,7 +329,9 @@ static int mongo_unlink(const char * path) {
         return -EIO;
     }
 
-    return do_trunc(&e, 0);
+    res = do_trunc(&e, 0);
+    free_inode(&e);
+    return res;
 }
 
 static int mongo_chmod(const char * path, mode_t mode) {
