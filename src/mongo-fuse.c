@@ -191,7 +191,6 @@ static int mongo_link(const char * path, const char * newpath) {
 static int mongo_unlink(const char * path) {
     struct inode e;
     int res;
-    mongo * conn = get_conn();
 
     if((res = get_inode(path, &e)) != 0)
         return res;
@@ -211,18 +210,6 @@ static int mongo_unlink(const char * path) {
         res = commit_inode(&e);
         free_inode(&e);
         return res;
-    }
-
-    bson cond;
-    bson_init(&cond);
-    bson_append_oid(&cond, "_id", &e.oid);
-    bson_finish(&cond);
-
-    res = mongo_remove(conn, inodes_name, &cond, NULL);
-    bson_destroy(&cond);
-    if(res != MONGO_OK) {
-        fprintf(stderr, "Error removing inode entry for %s\n", path);
-        return -EIO;
     }
 
     res = do_trunc(&e, 0);

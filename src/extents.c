@@ -17,6 +17,7 @@
 
 extern const char * dbname;
 extern const char * blocks_name;
+extern const char * inodes_name;
 extern int blocks_name_len;
 static const char * block_suffixes[] = {
     "4k", "8k", "16k", "32k", "64k", "128k", "256k", "512k", "1m"
@@ -258,10 +259,30 @@ int do_trunc(struct inode * e, off_t off) {
         return 0;
     }
 
-    fprintf(stderr, "Truncating file %llu bytes to %llu\n", e->size, off);
+    if(off == 0) {
+        bson_oid_t oldid;
+        bson removecond;
+        memcpy(&oldid, &e->oid, sizeof(bson_oid_t));
 
-    memcpy(&id.oid, &e->oid, sizeof(bson_oid_t));
+        bson_init(&removecond);
+        bson_append_oid(&removecond, "_id", &oldid);
+        bson_finish(&removecond);
+
+        add_unlink(e);
+        bson_oid_gen(&e->oid);
+
+        res = mongo_remove(conn, inodes_name, &removecond, NULL);
+        bson_destroy(&removecond);
+        if(res != MONGO_OK) {
+            fprintf(stderr, "Error removing inode during truncate\n");
+            return -EIO;
+        }
+        return 0;
+    }
+
+    fprintf(stderr, "Truncating file %llu bytes to %llu\n", e->size, off);
     get_block_collection(e, blocks_coll);
+    memcpy(&id.oid, &e->oid, sizeof(bson_oid_t));
     while(moving_off < e->size) {
         id.start = moving_off;
         bson_init(&cond);

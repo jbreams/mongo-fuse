@@ -44,6 +44,7 @@ mongo * get_conn();
 void setup_threading();
 void teardown_threading();
 void add_block_stat(const char * path, size_t size, int write);
+void add_unlink(struct inode * e);
 uint32_t round_up_pow2(uint32_t v);
 char * get_compress_buf();
 struct extent * new_extent(struct inode * e);
