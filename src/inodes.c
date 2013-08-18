@@ -14,7 +14,6 @@
 
 extern const char * inodes_name;
 extern const char * locks_name;
-extern mongo conn;
 
 int commit_inode(struct inode * e) {
     bson cond, doc;

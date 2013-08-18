@@ -17,6 +17,7 @@
 #include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <limits.h>
 #include "mongo-fuse.h"
 
 char * blocks_name = "test.blocks";
@@ -27,7 +28,10 @@ char * dbname = "test";
 const char * mongo_host = "127.0.0.1";
 int mongo_port = 27017;
 
-static int mongo_mkdir(const char * path, mode_t mode);
+int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+    off_t offset, struct fuse_file_info *fi);
+int mongo_mkdir(const char * path, mode_t mode);
+int mongo_rmdir(const char * path);
 int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                struct fuse_file_info *fi);
 int mongo_write(const char *path, const char *buf, size_t size,
@@ -62,78 +66,6 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
 
     free_inode(&e);
     return res;
-}
-
-static int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-                         off_t offset, struct fuse_file_info *fi) {
-    bson query, fields;
-    mongo_cursor curs;
-    struct stat stbuf;
-    size_t pathlen = strlen(path), printlen = pathlen;
-    char * regexp = malloc(pathlen + 10);
-    int res;
-    mongo * conn = get_conn();
-
-    filler(buf, ".", NULL, 0);
-    filler(buf, "..", NULL, 0);
-
-    if(pathlen > 1)
-        printlen++;
-
-    sprintf(regexp, "^%s/[^/]+$", pathlen == 1 ? path + 1 : path);
-    bson_init(&query);
-    bson_append_regex(&query, "dirents", regexp, "");
-    bson_finish(&query);
-
-    bson_init(&fields);
-    bson_append_int(&fields, "data", 0);
-    bson_finish(&fields);
-
-    mongo_cursor_init(&curs, conn, inodes_name);
-    mongo_cursor_set_query(&curs, &query);
-    mongo_cursor_set_fields(&curs, &fields);
-
-    while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
-        struct inode e;
-        struct dirent * cde;
-        res = read_inode(mongo_cursor_bson(&curs), &e);
-        if(res != 0) {
-            fprintf(stderr, "Error in read_\n");
-            break;
-        }
-
-        stbuf.st_nlink = e.direntcount;
-        stbuf.st_mode = e.mode;
-        if(stbuf.st_mode & S_IFDIR)
-            stbuf.st_nlink++;
-        stbuf.st_uid = e.owner;
-        stbuf.st_gid = e.group;
-        stbuf.st_size = e.size;
-        stbuf.st_ctime = e.created;
-        stbuf.st_mtime = e.modified;
-        stbuf.st_atime = e.modified;
-        stbuf.st_dev = e.dev;
-
-        cde = e.dirents;
-        while(cde) {
-            if(strncmp(cde->path, path, pathlen) == 0)
-                filler(buf, cde->path + printlen, &stbuf, 0);
-            cde = cde->next;
-        }
-        free_inode(&e);
-    }
-    bson_destroy(&query);
-    bson_destroy(&fields);
-    free(regexp);
-    mongo_cursor_destroy(&curs);
-
-    if(curs.err != MONGO_CURSOR_EXHAUSTED)
-        return -EIO;
-
-    if(res < -1)
-        return res;
-
-    return 0;
 }
 
 static int mongo_rename(const char * path, const char * newpath) {
@@ -185,10 +117,6 @@ static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * 
     return res;
 }
 
-static int mongo_mkdir(const char * path, mode_t mode) {
-    return create_inode(path, mode | S_IFDIR, NULL);
-}
-
 static int mongo_symlink(const char * path, const char * target) {
     return create_inode(target, 0120777, path);
 }
@@ -214,49 +142,17 @@ static int mongo_readlink(const char * path, char * out, size_t outlen) {
     return 0;
 }
 
-static int mongo_rmdir(const char * path) {
-    struct inode e;
-    int res;
-    double dres;
-    bson cond;
-    size_t pathlen = strlen(path);
-    char * regexp = malloc(pathlen + 10);
-    mongo * conn = get_conn();
-
-    sprintf(regexp, "^%s/[^/]+", path + 1);
-    bson_init(&cond);
-    bson_append_regex(&cond, "dirents", regexp, "");
-    bson_finish(&cond);
-
-    dres = mongo_count(conn, dbname, inodes_coll, &cond);
-    bson_destroy(&cond);
-    free(regexp);
-
-    if(dres > 1)
-        return -ENOTEMPTY;
-
-    if((res = get_inode(path, &e)) != 0)
-        return res;
-
-    bson_init(&cond);
-    bson_append_oid(&cond, "_id", &e.oid);
-    bson_finish(&cond);
-
-    res = mongo_remove(conn, inodes_name, &cond, NULL);
-    bson_destroy(&cond);
-    if(res != MONGO_OK) {
-        fprintf(stderr, "Error removing inode entry for %s\n", path);
-        return -EIO;
-    }
-    return 0;
-}
-
 static int mongo_truncate(const char * path, off_t off) {
     struct inode e;
     int res;
 
     if((res = get_inode(path, &e)) != 0)
         return res;
+
+    if(off == e.size) {
+        free_inode(&e);
+        return 0;
+    }
 
     res = do_trunc(&e, off);
     if(res != 0) {
@@ -377,6 +273,19 @@ static int mongo_utimens(const char * path, const struct timespec tv[2]) {
         e.modified = tv[1].tv_sec;
 
     res = commit_inode(&e);
+    if(res != 0) {
+        free_inode(&e);
+        return res;
+    }
+
+    if(e.mode & S_IFDIR) {
+        size_t pathlen = strlen(path);
+        char * filename = (char*)path + pathlen;
+        while(*(filename - 1) != '/') filename--;
+        if(strcmp(filename, ".snapshot") == 0)
+            res = snapshot_dir(path, pathlen, e.mode);
+    }
+
     free_inode(&e);
     return res;
 }

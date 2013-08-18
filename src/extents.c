@@ -18,13 +18,6 @@ static const char * block_suffixes[] = {
     "4k", "8k", "16k", "32k", "64k", "128k", "256k", "512k", "1m"
 };
 
-#pragma pack(1)
-struct inode_id {
-    bson_oid_t oid;
-    uint64_t start;
-};
-#pragma pack()
-
 off_t compute_start(struct inode * e, off_t offset) {
     return (offset / e->blocksize) * e->blocksize;
 }

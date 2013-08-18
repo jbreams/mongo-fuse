@@ -33,6 +33,13 @@ struct inode {
     size_t datalen;
 };
 
+#pragma pack(1)
+struct inode_id {
+    bson_oid_t oid;
+    uint64_t start;
+};
+#pragma pack()
+
 mongo * get_conn();
 void setup_threading();
 void teardown_threading();
@@ -58,3 +65,9 @@ int resolve_extent(struct inode * e, off_t start,
 void get_block_collection(struct inode * e, char * name);
 off_t compute_start(struct inode * e, off_t offset);
 int do_trunc(struct inode * e, off_t off);
+
+int read_dirents(const char * directory,
+    int (*dirent_cb)(struct inode *e, void * p,
+    const char * parent, size_t parentlen), void * p);
+int snapshot_dir(const char * path, size_t pathlen, mode_t mode);
+
