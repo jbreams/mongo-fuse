@@ -9,7 +9,11 @@
 #include "mongo-fuse.h"
 #include <osxfuse/fuse.h>
 #include <snappy-c.h>
-#include "sha1.h"
+#ifdef __APPLE__
+#include <CommonCrypto/CommonDigest.h>
+#else
+#include <openssl/sha.h>
+#endif
 
 extern const char * dbname;
 extern const char * blocks_name;
@@ -73,7 +77,11 @@ int commit_extent(struct inode * ent, struct extent *e) {
     uint32_t offset, reallen;
     struct inode_id id;
 
-    sha1((uint8_t*)e->data, ent->blocksize, hash);
+#ifdef __APPLE__
+    CC_SHA1(e->data, ent->blocksize, hash);
+#else
+    SHA1((uint8_t*)e->data, ent->blocksize, hash);
+#endif
     get_block_collection(ent, blocks_coll);
 
     id.start = e->start;
