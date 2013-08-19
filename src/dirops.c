@@ -137,26 +137,62 @@ int mongo_mkdir(const char * path, mode_t mode) {
     return create_inode(snapshotdir, mode | S_IFDIR, NULL);
 }
 
+int orphan_snapshot(struct inode *e, void * p,
+    const char * parent, size_t parentlen) {
+    const char * topparent = (const char*)p;
+    const char * shortname = e->dirents->path + e->dirents->len;
+    int rootlen = strlen(topparent);
+    while(topparent[--rootlen] != '/');
+    int res, nslashes = 1;
+    struct dirent * save = e->dirents;
+
+    if(e->mode & S_IFDIR) {
+        nslashes--;
+        if((res = read_dirents(e->dirents->path,
+            orphan_snapshot, (void*)topparent)) != 0)
+            return res;
+    }
+
+    while(nslashes > 0 || *(shortname - 1) != '/') {
+        if(*(shortname - 1) == '/')
+            nslashes--;
+        shortname--;
+    }
+    struct dirent * nd = malloc(sizeof(struct dirent) + PATH_MAX);
+    nd->len = sprintf(nd->path, "/%*.s.snapshot/orphaned-%s/%s",
+        rootlen, topparent, topparent + rootlen + 1, shortname);
+    free(nd);
+    nd->next = e->dirents->next;
+    e->dirents = nd;
+    commit_inode(e);
+    e->dirents = save;
+
+    return 0;
+}
+
 int mongo_rmdir(const char * path) {
     struct inode e;
     int res;
     double dres;
     bson cond;
     size_t pathlen = strlen(path);
-    char * regexp = malloc(pathlen + 10);
+    char regexp[PATH_MAX + 25], *filename = (char*)path + pathlen;
     mongo * conn = get_conn();
 
-    sprintf(regexp, "^%s/[^/]+", path + 1);
+    sprintf(regexp, "^%s/[^/]+(?<!\\.snapshot)$", path);
     bson_init(&cond);
     bson_append_regex(&cond, "dirents", regexp, "");
     bson_finish(&cond);
 
     dres = mongo_count(conn, dbname, inodes_coll, &cond);
     bson_destroy(&cond);
-    free(regexp);
 
-    if(dres > 1)
+    if(dres > 0)
         return -ENOTEMPTY;
+
+    //sprintf(regexp, "%s/.snapshot", path);
+    //if((res = get_inode(regexp, &e)) != 0)
+    //    return res;
 
     if((res = get_inode(path, &e)) != 0)
         return res;
