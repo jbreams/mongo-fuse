@@ -71,7 +71,7 @@ int read_dirents(const char * directory,
         filename = cde->path + cde->len;
         while(*(filename - 1) != '/')
             filename--;
-        if(strcmp(filename, ".snapshot") != 0 && e.mode & S_IFDIR)
+        if(!(strcmp(filename, ".snapshot") == 0 && e.mode & S_IFDIR))
             res = dirent_cb(&e, p, directory, pathlen);
         free_inode(&e);
         if(res != 0)
