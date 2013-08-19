@@ -226,6 +226,7 @@ int resolve_extent(struct inode * e, off_t start,
             else if(strcmp(key, "offset") == 0)
                 offset = bson_iterator_int(&i);
         }
+        out->start = start;
         memcpy(&out->data + offset, comp_out, outsize);
     }
 
