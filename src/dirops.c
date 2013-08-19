@@ -45,6 +45,7 @@ int read_dirents(const char * directory,
     while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
         struct inode e;
         struct dirent * cde, *last = NULL;
+        const char * filename;
         res = read_inode(mongo_cursor_bson(&curs), &e);
         if(res != 0) {
             fprintf(stderr, "Error in read_inode\n");
@@ -67,7 +68,11 @@ int read_dirents(const char * directory,
             break;
         }
 
-        res = dirent_cb(&e, p, directory, pathlen);
+        filename = cde->path + cde->len;
+        while(*(filename - 1) != '/')
+            filename--;
+        if(strcmp(filename, ".snapshot") != 0 && e.mode & S_IFDIR)
+            res = dirent_cb(&e, p, directory, pathlen);
         free_inode(&e);
         if(res != 0)
             break;
