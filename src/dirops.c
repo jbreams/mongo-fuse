@@ -147,7 +147,7 @@ int orphan_snapshot(struct inode *e, void * p,
     struct dirent * save = e->dirents;
 
     if(e->mode & S_IFDIR) {
-        nslashes--;
+            nslashes--;
         if((res = read_dirents(e->dirents->path,
             orphan_snapshot, (void*)topparent)) != 0)
             return res;
@@ -158,9 +158,15 @@ int orphan_snapshot(struct inode *e, void * p,
             nslashes--;
         shortname--;
     }
+
     struct dirent * nd = malloc(sizeof(struct dirent) + PATH_MAX);
-    nd->len = sprintf(nd->path, "/%*.s.snapshot/orphaned-%s/%s",
-        rootlen, topparent, topparent + rootlen + 1, shortname);
+    if(strcmp(shortname, ".snapshot") == 0) {
+        nd->len = sprintf(nd->path, "/%*.s.snapshot/orphaned-%s",
+            rootlen, topparent, topparent + rootlen + 1);
+    } else {
+        nd->len = sprintf(nd->path, "/%*.s.snapshot/orphaned-%s/%s",
+            rootlen, topparent, topparent + rootlen + 1, shortname);
+    }
     free(nd);
     nd->next = e->dirents->next;
     e->dirents = nd;
@@ -175,8 +181,7 @@ int mongo_rmdir(const char * path) {
     int res;
     double dres;
     bson cond;
-    size_t pathlen = strlen(path);
-    char regexp[PATH_MAX + 25], *filename = (char*)path + pathlen;
+    char regexp[PATH_MAX + 25];
     mongo * conn = get_conn();
 
     sprintf(regexp, "^%s/[^/]+(?<!\\.snapshot)$", path);
@@ -190,9 +195,14 @@ int mongo_rmdir(const char * path) {
     if(dres > 0)
         return -ENOTEMPTY;
 
-    //sprintf(regexp, "%s/.snapshot", path);
-    //if((res = get_inode(regexp, &e)) != 0)
-    //    return res;
+    sprintf(regexp, "%s/.snapshot", path);
+    if((res = get_inode(regexp, &e)) != 0)
+        return res;
+
+    res = orphan_snapshot(&e, (void*)path, NULL, 0);
+    free_inode(&e);
+    if(res != 0)
+        return res;
 
     if((res = get_inode(path, &e)) != 0)
         return res;
