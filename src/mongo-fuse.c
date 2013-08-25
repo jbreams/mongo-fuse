@@ -43,14 +43,8 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
 
     memset(stbuf, 0, sizeof(struct stat));
     res = get_inode(path, &e);
-    if(res != 0) {
-        if(strcmp(path, "/") == 0) {
-            stbuf->st_mode = S_IFDIR | 0755;
-            stbuf->st_nlink = 2;
-            return mongo_mkdir("/", 0755);
-        }
+    if(res != 0)
         return res;
-    }
 
     stbuf->st_nlink = e.direntcount;
     stbuf->st_mode = e.mode;
@@ -285,8 +279,12 @@ static int mongo_access(const char * path, int amode) {
     if(fcx->uid == 0)
         return 0;
 
-    if((res = get_inode(path, &e)) != 0)
+    if((res = get_inode(path, &e)) != 0) {
+        if(res == -ENOENT && strcmp(path, "/") == 0) {
+            res = mongo_mkdir("/", 0755);
+        }
         return res;
+    }
 
     res = check_access(&e, amode) ? -EACCES : 0;
     free_inode(&e);
