@@ -123,7 +123,27 @@ int read_inode(const bson * doc, struct inode * out) {
         }
     }
 
+    if(out->size > 0) {
+        out->nmaps = (out->size / (out->blocksize * BLOCKS_PER_MAP)) + 1;
+        out->maps = malloc(sizeof(struct block_map*) * out->nmaps);
+        if(!out->maps)
+            return -ENOMEM;
+        memset(out->maps, 0, sizeof(struct block_map*) * out->nmaps);
+    }
+
     return 0;
+}
+
+int get_cached_inode(const char * path, struct inode * out) {
+    time_t now = time(NULL);
+    int res;
+    if(now - out->updated < 3)
+        return 0;
+
+    res = get_inode(path, out);
+    if(res == 0)
+        out->updated = now;
+    return res;
 }
 
 int get_inode(const char * path, struct inode * out) {
@@ -196,6 +216,8 @@ int choose_block_size(const char * path, size_t len) {
     char *parentpath = strdup(path), *ppl = (char*)parentpath + len;
     struct inode parent;
 
+    return 65536;
+
     while(blocksize == 0 && ppl - path > 1) {
         while(*ppl != '/') ppl--;
         if(ppl - path > 0)
@@ -260,6 +282,8 @@ int create_inode(const char * path, mode_t mode, const char * data) {
         e.datalen = 0;
         e.size = 0;
     }
+    e.maps = NULL;
+    e.nmaps = 0;
 
     res = commit_inode(&e);
     free_inode(&e);
@@ -273,5 +297,12 @@ void free_inode(struct inode *e) {
         struct dirent * next = e->dirents->next;
         free(e->dirents);
         e->dirents = next;
+    }
+    if(e->maps) {
+        for(int i = 0; i < e->nmaps; i++) {
+            if(e->maps[i])
+                free(e->maps[i]);
+        }
+        free(e->maps);
     }
 }
