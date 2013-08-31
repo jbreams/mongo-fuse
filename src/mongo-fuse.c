@@ -23,10 +23,13 @@
 char * blocks_name = "test.blocks";
 char * inodes_name = "test.inodes";
 char * locks_name = "test.locks";
+char * maps_name = "test.maps";
 char * inodes_coll = "inodes";
 char * dbname = "test";
 const char * mongo_host = "127.0.0.1";
 int mongo_port = 27017;
+
+extern struct extent * block_cache[];
 
 int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     off_t offset, struct fuse_file_info *fi);
@@ -95,20 +98,26 @@ static int mongo_rename(const char * path, const char * newpath) {
 
 static int mongo_open(const char *path, struct fuse_file_info *fi)
 {
-    struct inode e;
+    struct inode * e = malloc(sizeof(struct inode));
     int res;
 
-    res = get_inode(path, &e);
-    if(res == 0)
-        free_inode(&e);
-    return res;
+    res = get_inode(path, e);
+    if(res != 0) {
+        free_inode(e);
+        free(e);
+        return res;
+    }
+    fi->fh = (uintptr_t)e;
+    return 0;
 }
 
 static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * fi) {
     int res = create_inode(path, mode, NULL);
-    if(res == -EEXIST)
-        return fi->flags & O_EXCL ? res : 0;
-    return res;
+    if(res == -EEXIST && fi->flags & O_EXCL)
+        return -EEXIST;
+    else if(res != 0)
+        return res;
+    return mongo_open(path, fi);
 }
 
 static int mongo_symlink(const char * path, const char * target) {
@@ -185,6 +194,8 @@ static int mongo_link(const char * path, const char * newpath) {
 static int mongo_unlink(const char * path) {
     struct inode e;
     int res;
+    mongo * conn = get_conn();
+    bson cond;
 
     if((res = get_inode(path, &e)) != 0)
         return res;
@@ -207,6 +218,15 @@ static int mongo_unlink(const char * path) {
     }
 
     res = do_trunc(&e, 0);
+    if(res == 0) {
+        bson_init(&cond);
+        bson_append_oid(&cond, "_id", &e.oid);
+        bson_finish(&cond);
+
+        res = mongo_remove(conn, inodes_name, &cond, NULL);
+        bson_destroy(&cond);
+    }
+
     free_inode(&e);
     return res;
 }
@@ -318,6 +338,38 @@ static int mongo_flock(const char * path, struct fuse_file_info * fi, int op) {
 }
 #endif
 
+static int mongo_flush(const char * path, struct fuse_file_info * fi) {
+    struct inode * e = (struct inode*)fi->fh;
+    int res;
+    if(e->maps) {
+        for(int i = 0; i < e->nmaps; i++) {
+            if((res = commit_blockmap(e, e->maps[i])) != 0)
+                return res;
+        }
+    }
+    return 0;
+}
+
+static int mongo_release(const char * path, struct fuse_file_info * fi) {
+    int res =mongo_flush(path, fi);
+    if(res != 0)
+        return res;
+    struct inode * e = (struct inode*)fi->fh;
+    free_inode(e);
+    free(e);
+    return 0;
+}
+
+static void *mongo_initfs(struct fuse_conn_info * conn) {
+    struct inode e;
+    int res = get_inode("/", &e);
+    if(res != 0) {
+         mongo_mkdir("/", 0755);
+    } else
+        free_inode(&e);
+    return NULL;
+}
+
 static struct fuse_operations mongo_oper = {
     .getattr    = mongo_getattr,
     .readdir    = mongo_readdir,
@@ -337,6 +389,9 @@ static struct fuse_operations mongo_oper = {
     .access     = mongo_access,
     .symlink    = mongo_symlink,
     .readlink   = mongo_readlink,
+    .flush      = mongo_flush,
+    .release    = mongo_release,
+    .init       = mongo_initfs
 #if FUSE_VERSION > 28
     .flock      = mongo_flock
 #endif
@@ -344,8 +399,15 @@ static struct fuse_operations mongo_oper = {
 
 int main(int argc, char *argv[])
 {
+    int i;
     setup_threading();
+    memset(block_cache, 0, sizeof(struct extent*) * BLOCK_CACHE_SIZE);
     int rc = fuse_main(argc, argv, &mongo_oper, NULL);
     teardown_threading();
+
+    for(i = 0; i < BLOCK_CACHE_SIZE; i++) {
+        if(block_cache[i])
+            free(block_cache[i]);
+    }
     return rc;
 }

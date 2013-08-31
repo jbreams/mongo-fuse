@@ -227,10 +227,7 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
     const char * path = e->dirents->path;
     size_t pathlen = e->dirents->len;
     char * filename = (char*)path + pathlen;
-    char blocks_coll[32];
-    struct inode_id source, dest;
     uint64_t off = 0;
-    mongo * conn = get_conn();
 
     if(e->mode & S_IFDIR)
         return 0;
@@ -238,34 +235,16 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
     bson_oid_gen(&newid);
     while(*(filename-1) != '/') filename--;
 
-    memcpy(&source.oid, &e->oid, sizeof(bson_oid_t));
-    memcpy(&dest.oid, &newid, sizeof(bson_oid_t));
-    get_block_collection(e, blocks_coll);
-
     while(off < e->size) {
-        bson cond, doc;
-        source.start = off;
-        dest.start = off;
-
-        bson_init(&cond);
-        bson_append_binary(&cond, "refs", 0, (char*)&source, sizeof(source));
-        bson_finish(&cond);
-
-        bson_init(&doc);
-        bson_append_start_object(&doc, "$addToSet");
-        bson_append_binary(&doc, "refs", 0, (char*)&dest, sizeof(dest));
-        bson_append_finish_object(&doc);
-        bson_finish(&doc);
-
-        res = mongo_update(conn, blocks_coll, &cond, &doc, 0, NULL);
-        bson_destroy(&cond);
-        bson_destroy(&doc);
-
-        if(res != MONGO_OK) {
-            fprintf(stderr, "Error committing reference during snapshotting\n");
-            return -EIO;
-        }
-        off += e->blocksize;
+        if((res = get_blockmap(e, off)) < 0)
+            return res;
+        struct block_map * map = e->maps[res];
+        memcpy(&map->inode, &newid, sizeof(bson_oid_t));
+        map->updated = 0;
+        memset(map->changed, 1, sizeof(map->changed));
+        if((res = commit_blockmap(e, e->maps[res])) != 0)
+            return res;
+        off += BLOCKS_PER_MAP * e->blocksize;
     }
 
     memcpy(&e->oid, &newid, sizeof(bson_oid_t));

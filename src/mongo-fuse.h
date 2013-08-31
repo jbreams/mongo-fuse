@@ -9,6 +9,18 @@ struct extent {
     char data[1];
 };
 
+#define BLOCKS_PER_MAP 1024
+#define BLOCK_CACHE_SIZE 2048
+
+struct block_map {
+    bson_oid_t oid;
+    bson_oid_t inode;
+    uint64_t start;
+    time_t updated;
+    uint32_t changed[BLOCKS_PER_MAP/32];
+    uint8_t blocks[BLOCKS_PER_MAP][20];
+};
+
 struct dirent {
     struct dirent * next;
     size_t len;
@@ -16,6 +28,7 @@ struct dirent {
 };
 
 struct inode {
+    time_t updated;
     bson_oid_t oid;
     struct dirent * dirents;
     int direntcount;
@@ -31,6 +44,8 @@ struct inode {
     uint64_t writes[8];
     char * data;
     size_t datalen;
+    struct block_map ** maps;
+    int nmaps;
 };
 
 #pragma pack(1)
@@ -51,6 +66,7 @@ struct extent * new_extent(struct inode * e);
 
 void free_inode(struct inode *e);
 int get_inode(const char * path, struct inode * out);
+int get_cached_inode(const char * path, struct inode * out);
 int commit_inode(struct inode * e);
 int create_inode(const char * path, mode_t mode, const char * data);
 int check_access(struct inode * e, int amode);
@@ -66,6 +82,8 @@ int resolve_extent(struct inode * e, off_t start,
 void get_block_collection(struct inode * e, char * name);
 off_t compute_start(struct inode * e, off_t offset);
 int do_trunc(struct inode * e, off_t off);
+int commit_blockmap(struct inode * e, struct block_map *map);
+int get_blockmap(struct inode * e, off_t pos);
 
 int read_dirents(const char * directory,
     int (*dirent_cb)(struct inode *e, void * p,

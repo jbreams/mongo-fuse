@@ -16,29 +16,30 @@
 
 int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                struct fuse_file_info *fi) {
-    struct inode e;
+    struct inode * e;
     int res;
     struct extent * o;
     char * block = buf;
     size_t tocopy, start;
     const off_t end = size + offset;
 
-    if((res = get_inode(path, &e)) != 0)
+    e = (struct inode*)fi->fh;
+    if((res = get_cached_inode(path, e)) != 0)
         return res;
 
-    if(e.mode & S_IFDIR)
+    if(e->mode & S_IFDIR)
         return -EISDIR;
 
-    if(offset > e.size)
+    if(offset > e->size)
         return 0;
 
     while(block - buf != size) {
-        start = compute_start(&e, offset);
-        if((res = resolve_extent(&e, start, &o, 1)) != 0)
+        start = compute_start(e, offset);
+        if((res = resolve_extent(e, start, &o, 1)) != 0)
             return res;
 
         char * elock;
-        size_t curblocksize = e.blocksize, sizediff = offset - start;
+        size_t curblocksize = e->blocksize, sizediff = offset - start;
         if(offset > start)
             curblocksize -= sizediff;
         if(end - offset < curblocksize)
@@ -57,44 +58,45 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         offset += tocopy;
     }
 
-    add_block_stat(path, size, 0);
+ //   add_block_stat(path, size, 0);
     return block - buf;
 }
 
 int mongo_write(const char *path, const char *buf, size_t size,
                 off_t offset, struct fuse_file_info *fi)
 {
-    struct inode e;
+    struct inode * e;
     int res;
     char * block = (char*)buf;
     const off_t end = size + offset;
     off_t curblock;
     size_t tocopy;
 
-    if((res = get_inode(path, &e)) != 0)
+    e = (struct inode*)fi->fh;
+    if((res = get_cached_inode(path, e)) != 0)
         return res;
 
-    if(e.mode & S_IFDIR)
+    if(e->mode & S_IFDIR)
         return -EISDIR;
 
-    curblock = compute_start(&e, offset);
+    curblock = compute_start(e, offset);
     while(offset < end) {
-        size_t curblocksize = e.blocksize, sizediff = 0;
+        size_t curblocksize = e->blocksize, sizediff = 0;
         struct extent * cur = NULL;
-        int getdata = (offset != curblock || end - curblock < e.blocksize);
+        int getdata = (offset != curblock || end - curblock < e->blocksize);
         char * elock;
-        if((res = resolve_extent(&e, curblock, &cur, getdata)) != 0)
+        if((res = resolve_extent(e, curblock, &cur, getdata)) != 0)
             goto cleanup;
 
         if(!cur) {
-            cur = new_extent(&e);
+            cur = new_extent(e);
             cur->start = curblock;
         }
 
         if(curblock < offset) {
             sizediff = offset - curblock;
             elock = cur->data + sizediff;
-            curblocksize = e.blocksize - sizediff;
+            curblocksize = e->blocksize - sizediff;
         } else
             elock = cur->data;
 
@@ -104,24 +106,23 @@ int mongo_write(const char *path, const char *buf, size_t size,
             tocopy = curblocksize;
 
         memcpy(elock, block, tocopy);
-        if((res = commit_extent(&e, cur)) != 0)
+        if((res = commit_extent(e, cur)) != 0)
             goto cleanup;
 
         block += tocopy;
         offset += tocopy;
-        curblock = compute_start(&e, offset);
+        curblock = compute_start(e, offset);
     }
 
-    if(end > e.size)
-        e.size = end;
-    res = commit_inode(&e);
+    if(end > e->size)
+        e->size = end;
+    res = commit_inode(e);
 
 cleanup:
-    free_inode(&e);
     if(res != 0)
         return res;
     else
-        add_block_stat(path, size, 1);
+ //       add_block_stat(path, size, 1);
     return size;
 }
 
