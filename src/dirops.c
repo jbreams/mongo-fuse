@@ -293,3 +293,24 @@ int snapshot_dir(const char * path, size_t pathlen, mode_t mode) {
 
     return read_dirents(dirpath, create_snapshot, &icount);
 }
+
+int mongo_rename(const char * path, const char * newpath) {
+    mongo * conn = get_conn();
+    bson query, doc;
+    int res;
+
+    bson_init(&query);
+    bson_append_string(&query, "dirents", path);
+    bson_finish(&query);
+
+    bson_init(&doc);
+    bson_append_start_object(&doc, "$set");
+    bson_append_string(&doc, "dirents.$", newpath);
+    bson_append_finish_object(&doc);
+    bson_finish(&doc);
+
+    res = mongo_update(conn, inodes_name, &query, &doc,
+        MONGO_UPDATE_BASIC, NULL);
+    return res == MONGO_OK ? 0:-EIO;
+}
+

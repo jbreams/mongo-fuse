@@ -21,9 +21,6 @@ extern const char * blocks_name;
 extern const char * inodes_name;
 extern const char * maps_name;
 extern int blocks_name_len;
-static const char * block_suffixes[] = {
-    "4k", "8k", "16k", "32k", "64k", "128k", "256k", "512k", "1m"
-};
 
 #define WORD_OFFSET(b) ((b) / 32)
 #define BIT_OFFSET(b)  ((b) % 32)
@@ -31,6 +28,50 @@ static char empty_hash[] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
 struct extent * block_cache[BLOCK_CACHE_SIZE];
 pthread_mutex_t block_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void cache_block(uint8_t hash[20], struct inode * ent, struct extent * e) {
+    uint16_t chash = (*(uint16_t*)hash) & (BLOCK_CACHE_SIZE - 1);
+    int hash_offset = 0, cmp_result = 1;
+    const int max_offset = 20 / sizeof(uint16_t);
+    while(hash_offset < max_offset && block_cache[chash] &&
+        (cmp_result = memcmp(hash, block_cache[chash]->hash, 20)) != 0) {
+        hash_offset += sizeof(uint16_t);
+        chash = (*(((uint16_t*)hash) + hash_offset)) & (BLOCK_CACHE_SIZE - 1);
+    }
+
+    if(cmp_result == 0)
+        return;
+
+    if(hash_offset > max_offset) {
+        hash_offset -= sizeof(uint16_t);
+        chash = *(((uint16_t*)hash) + sizeof(uint16_t));
+    }
+
+    if(block_cache[chash])
+        free(block_cache[chash]);
+
+    block_cache[chash] = malloc(sizeof(struct extent) + ent->blocksize);
+    if(!block_cache[chash]) {
+        block_cache[chash] = NULL;
+        return;
+    }
+    memcpy(block_cache[chash], e, sizeof(struct extent) + ent->blocksize);
+}
+
+int get_cached_block(uint8_t hash[20], struct inode * ent, struct extent * e) {
+    uint16_t chash = (*(uint16_t*)hash) & (BLOCK_CACHE_SIZE - 1);
+    int hash_offset = 0, cmp_result = 1;
+    const int max_offset = 20/ sizeof(uint16_t);
+    while(hash_offset < max_offset && block_cache[chash] &&
+        (cmp_result = memcmp(hash, block_cache[chash]->hash, 20)) != 0) {
+        hash_offset += sizeof(uint16_t);
+        chash = (*(((uint16_t*)hash) + hash_offset)) & (BLOCK_CACHE_SIZE - 1);
+    }
+
+    if(cmp_result == 0)
+        return chash;
+    return -ENOENT;
+}
 
 off_t compute_start(struct inode * e, off_t offset) {
     return (offset / e->blocksize) * e->blocksize;
@@ -190,6 +231,7 @@ int get_blockmap(struct inode * e, off_t pos) {
 
     if((res = read_blockmap(e, map, start)) != 0)
         return res;
+    e->maps[map]->updated = now;
     return map;
 }
 
@@ -201,6 +243,8 @@ int set_block_hash(struct inode * e, off_t off, uint8_t hash[20]) {
     int block = (off - map->start) / e->blocksize;
     if(memcmp(map->blocks[block], hash, 20) == 0)
         return 0;
+    if(memcmp(map->blocks[block], empty_hash, 20) != 0)
+        decref_block(map->blocks[block]);
     memcpy(map->blocks[block], hash, 20);
     map->changed[WORD_OFFSET(block)] |= (1 << BIT_OFFSET(block));
     return 0;
@@ -214,6 +258,7 @@ int clear_block_hash(struct inode * e, off_t off) {
     int block = (off - map->start) / e->blocksize;
     if(memcmp(map->blocks[block], empty_hash, 20) == 0)
         return 0;
+    decref_block(map->blocks[block]);
     memset(map->blocks[block], 0, 20);
     map->changed[WORD_OFFSET(block)] |= (1 << BIT_OFFSET(block));
     return 0;
@@ -229,57 +274,13 @@ int get_block_hash(struct inode * e, off_t off, uint8_t hashout[20]) {
     return 0;
 }
 
-int get_blocksize_index(struct inode * e) {
-    int i;
-    switch(e->blocksize) {
-        case 4096:
-        default:
-            i = 0;
-            break;
-        case 8192:
-            i = 1;
-            break;
-        case 16384:
-            i = 2;
-            break;
-        case 32768:
-            i = 3;
-            break;
-        case 65536:
-            i = 4;
-            break;
-        case 132072:
-            i = 5;
-            break;
-        case 262144:
-            i = 6;
-            break;
-        case 524288:
-            i = 7;
-            break;
-        case 1048576:
-            i = 8;
-            break;
-    }
-    return i;
-}
-
-void get_block_collection(struct inode * e, char * name) {
-    int i = get_blocksize_index(e);
-    sprintf(name, "%s_%s", blocks_name, block_suffixes[i]);
-}
-
 int commit_extent(struct inode * ent, struct extent *e) {
     int res;
     bson doc, cond;
     mongo * conn = get_conn();
-    char blocks_coll[32];
     ssize_t realend = ent->blocksize;
     uint8_t hash[20];
     uint32_t offset, reallen;
-    uint16_t cache_hash;
-    struct extent * cached_ext;
-    size_t ext_size = sizeof(struct extent) + ent->blocksize;
 
     for(;realend >= 0 && e->data[realend] == '\0'; realend--);
     realend++;
@@ -298,25 +299,30 @@ int commit_extent(struct inode * ent, struct extent *e) {
 #else
     SHA1((uint8_t*)e->data, ent->blocksize, hash);
 #endif
-    get_block_collection(ent, blocks_coll);
+
+    bson_init(&cond);
+    bson_append_binary(&cond, "_id", 0, (char*)hash, sizeof(hash));
+    bson_finish(&cond);
 
     bson_init(&doc);
-    bson_append_binary(&cond, "_id", 0, (char*)hash, sizeof(hash));
-    if(reallen > 0) {
-        char * comp_out = get_compress_buf();
-        size_t comp_size = snappy_max_compressed_length(reallen);
-        if((res = snappy_compress(e->data + offset, reallen,
-            comp_out, &comp_size)) != SNAPPY_OK) {
-            fprintf(stderr, "Error compressing input: %d\n", res);
-            return -EIO;
-        }
-        bson_append_binary(&doc, "data", 0, comp_out, comp_size);
-    } else
-        bson_append_null(&doc, "data");
+    bson_append_start_object(&doc, "$setOnInsert");
+    char * comp_out = get_compress_buf();
+    size_t comp_size = snappy_max_compressed_length(reallen);
+    if((res = snappy_compress(e->data + offset, reallen,
+        comp_out, &comp_size)) != SNAPPY_OK) {
+        fprintf(stderr, "Error compressing input: %d\n", res);
+        return -EIO;
+    }
+    bson_append_binary(&doc, "data", 0, comp_out, comp_size);
     bson_append_int(&doc, "offset", offset);
+    bson_append_finish_object(&doc);
+    bson_append_start_object(&doc, "$inc");
+    bson_append_int(&doc, "refs", 1);
+    bson_append_finish_object(&doc);
     bson_finish(&doc);
 
-    res = mongo_insert(conn, blocks_coll, &doc, NULL);
+    res = mongo_update(conn, blocks_name, &cond, &doc,
+        MONGO_UPDATE_UPSERT, NULL);
     bson_destroy(&doc);
 
     if(res != MONGO_OK && conn->lasterrcode != 11000) {
@@ -324,30 +330,8 @@ int commit_extent(struct inode * ent, struct extent *e) {
         return -EIO;
     }
 
-    cache_hash = *(uint16_t*)hash;
-    cache_hash &= (BLOCK_CACHE_SIZE - 1);
     pthread_mutex_lock(&block_cache_lock);
-    if(block_cache[cache_hash]) {
-        cached_ext = block_cache[cache_hash];
-        if(memcmp(cached_ext->hash, hash, sizeof(hash)) != 0) {
-            free(cached_ext);
-            cached_ext = malloc(ext_size);
-            if(!cached_ext) {
-                pthread_mutex_unlock(&block_cache_lock);
-                return -ENOMEM;
-            }
-            memcpy(cached_ext, e, ext_size);
-            block_cache[cache_hash] = cached_ext;
-        }
-    } else {
-        cached_ext = malloc(ext_size);
-        if(!cached_ext) {
-            pthread_mutex_unlock(&block_cache_lock);
-            return -ENOMEM;
-        }
-        memcpy(cached_ext, e, ext_size);
-        block_cache[cache_hash] = cached_ext;
-    }
+    cache_block(hash, ent, e);
     pthread_mutex_unlock(&block_cache_lock);
 
     return set_block_hash(ent, e->start, hash);
@@ -362,11 +346,9 @@ int resolve_extent(struct inode * e, off_t start,
     bson_type bt;
     const char * key;
     mongo * conn = get_conn();
-    char block_coll[32];
     struct extent * out = new_extent(e);
     uint8_t hash[20];
     int foundhash = 0;
-    uint16_t cache_hash;
 
     if(out == NULL)
         return -ENOMEM;
@@ -384,13 +366,15 @@ int resolve_extent(struct inode * e, off_t start,
         return 0;
     }
 
-    cache_hash = *(uint16_t*)hash;
-    cache_hash &= (BLOCK_CACHE_SIZE - 1);
+    if(memcmp(hash, empty_hash, sizeof(hash)) == 0) {
+        *realout = NULL;
+        return 0;
+    }
+
     pthread_mutex_lock(&block_cache_lock);
-    if(block_cache[cache_hash] &&
-        memcmp(block_cache[cache_hash]->hash, hash, 20) == 0) {
+    if((res = get_cached_block(hash, e, out)) != -ENOENT) {
         size_t to_copy = sizeof(struct extent) + e->blocksize;
-        memcpy(out, block_cache[cache_hash], to_copy);
+        memcpy(out, block_cache[res], to_copy);
         pthread_mutex_unlock(&block_cache_lock);
         return 0;
     }
@@ -400,8 +384,7 @@ int resolve_extent(struct inode * e, off_t start,
     bson_append_binary(&query, "_id", 0, (char*)hash, 20);
     bson_finish(&query);
 
-    get_block_collection(e, block_coll);
-    mongo_cursor_init(&curs, conn, block_coll);
+    mongo_cursor_init(&curs, conn, blocks_name);
     mongo_cursor_set_query(&curs, &query);
     mongo_cursor_set_limit(&curs, 1);
 
@@ -452,7 +435,7 @@ int do_trunc(struct inode * e, off_t off) {
     bson cond;
     int res;
     mongo * conn = get_conn();
-
+    off_t new_size = off;
     if(e->mode & S_IFDIR)
         return -EISDIR;
 
@@ -461,10 +444,22 @@ int do_trunc(struct inode * e, off_t off) {
         return 0;
     }
 
+    off = compute_start(e, off);
+    while(off < e->size) {
+        uint8_t hash[20];
+        if((res = get_block_hash(e, off, hash)) != 0)
+            return res;
+        if(memcmp(hash, empty_hash, sizeof(hash)) != 0)
+            decref_block(hash);
+        off += e->blocksize;
+    }
+
+    e->size = new_size;
+
     bson_init(&cond);
     bson_append_oid(&cond, "inode", &e->oid);
-    if(off > 0) {
-        int highmap = off / (BLOCKS_PER_MAP * e->blocksize);
+    if(new_size > 0) {
+        int highmap = new_size / (BLOCKS_PER_MAP * e->blocksize);
         bson_append_start_object(&cond, "start");
         bson_append_long(&cond, "$gte",
             highmap * (BLOCKS_PER_MAP * e->blocksize));
@@ -474,7 +469,8 @@ int do_trunc(struct inode * e, off_t off) {
 
     res = mongo_remove(conn, maps_name, &cond, NULL);
     bson_destroy(&cond);
-    e->size = off;
+    if(res != 0)
+        return -EIO;
     return 0;
 }
 

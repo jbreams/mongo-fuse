@@ -15,6 +15,38 @@
 extern const char * inodes_name;
 extern const char * locks_name;
 
+int inode_exists(const char * path) {
+    bson query, fields;
+    mongo * conn = get_conn();
+    mongo_cursor curs;
+    int res;
+
+    bson_init(&query);
+    bson_append_string(&query, "dirents", path);
+    bson_finish(&query);
+
+    bson_init(&fields);
+    bson_append_int(&fields, "dirents", 1);
+    bson_append_int(&fields, "_id", 0);
+    bson_finish(&fields);
+
+    mongo_cursor_init(&curs, conn, inodes_name);
+    mongo_cursor_set_query(&curs, &query);
+    mongo_cursor_set_fields(&curs, &fields);
+    mongo_cursor_set_limit(&curs, 1);
+
+    res = mongo_cursor_next(&curs);
+    bson_destroy(&query);
+    bson_destroy(&fields);
+    mongo_cursor_destroy(&curs);
+
+    if(res == 0)
+        return 0;
+    if(curs.err != MONGO_CURSOR_EXHAUSTED)
+        return -EIO;
+    return -ENOENT;
+}
+
 int commit_inode(struct inode * e) {
     bson cond, doc;
     mongo * conn = get_conn();
@@ -51,7 +83,8 @@ int commit_inode(struct inode * e) {
     bson_append_oid(&cond, "_id", &e->oid);
     bson_finish(&cond);
 
-    res = mongo_update(conn, inodes_name, &cond, &doc, MONGO_UPDATE_UPSERT, NULL);
+    res = mongo_update(conn, inodes_name, &cond, &doc,
+        MONGO_UPDATE_UPSERT, NULL);
     bson_destroy(&cond);
     bson_destroy(&doc);
     if(res != MONGO_OK) {
@@ -216,8 +249,6 @@ int choose_block_size(const char * path, size_t len) {
     char *parentpath = strdup(path), *ppl = (char*)parentpath + len;
     struct inode parent;
 
-    return 65536;
-
     while(blocksize == 0 && ppl - path > 1) {
         while(*ppl != '/') ppl--;
         if(ppl - path > 0)
@@ -246,11 +277,11 @@ int create_inode(const char * path, mode_t mode, const char * data) {
     const struct fuse_context * fcx = fuse_get_context();
     int res, blocksize;
 
-    res = get_inode(path, &e);
+    res = inode_exists(path);
     if(res == 0) {
-        free_inode(&e);
         return -EEXIST;
-    }
+    } else if(res == -EIO)
+        return -EIO;
 
     if(mode & S_IFREG) {
         blocksize = choose_block_size(path, pathlen);

@@ -8,8 +8,7 @@ static pthread_key_t tls_key;
 extern const char * mongo_host;
 extern int mongo_port;
 extern const char * inodes_name;
-
-extern const char * block_suffixes[];
+extern const char * blocks_name;
 
 struct thread_data {
     mongo conn;
@@ -29,12 +28,9 @@ struct block_stat {
     char path[1];
 };
 
-struct unlink_stat {
-    struct unlink_stat * next;
-    uint64_t oldsize;
-    uint32_t blocksize;
-    char blocks_coll[32];
-    bson_oid_t oid;
+struct decref_stat {
+    uint8_t hash[20];
+    struct decref_stat * next;
 };
 
 pthread_cond_t compute_stats_cond = PTHREAD_COND_INITIALIZER;
@@ -42,7 +38,7 @@ pthread_mutex_t compute_stats_mutex = PTHREAD_MUTEX_INITIALIZER,
     block_stat_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_t stats_thread;
 struct block_stat * block_stat_head = NULL;
-struct unlink_stat * unlink_stat_head = NULL;
+struct decref_stat * decref_stat_head = NULL;
 size_t nops = 0, keep_computing_stats = 1;
 
 void add_block_stat(const char * path, size_t size, int write) {
@@ -67,19 +63,16 @@ void add_block_stat(const char * path, size_t size, int write) {
         pthread_cond_signal(&compute_stats_cond);
 }
 
-void add_unlink(struct inode * e) {
-    struct unlink_stat * n = malloc(sizeof(struct unlink_stat));
+void decref_block(const uint8_t hash[20]) {
     size_t l_nops;
+    struct decref_stat * n = malloc(sizeof(struct decref_stat));
     if(!n)
         return;
-    n->oldsize = e->size;
-    memcpy(&n->oid, &e->oid, sizeof(bson_oid_t));
-    get_block_collection(e, n->blocks_coll);
-    n->blocksize = e->blocksize;
+    memcpy(n->hash, hash, sizeof(n->hash));
 
     pthread_mutex_lock(&block_stat_mutex);
-    n->next = unlink_stat_head;
-    unlink_stat_head = n;
+    n->next = decref_stat_head;;
+    decref_stat_head = n;
     l_nops = nops++;
     pthread_mutex_unlock(&block_stat_mutex);
 
@@ -106,16 +99,17 @@ static void * stats_thread_fn(void * arg) {
 
     while(keep_computing_stats) {
         struct block_stat * head;
-        struct unlink_stat * unlink_head;
+        struct decref_stat * decref_head;
         mongo * conn = get_conn();
         pthread_cond_wait(&compute_stats_cond, &compute_stats_mutex);
         pthread_mutex_lock(&block_stat_mutex);
         head = block_stat_head;
         block_stat_head = NULL;
-        unlink_head = unlink_stat_head;
-        unlink_stat_head = NULL;
+        decref_head = decref_stat_head;
+        decref_stat_head = NULL;
         nops = 0;
         pthread_mutex_unlock(&block_stat_mutex);
+        bson rmcond;
 
         while(head) {
             bson doc, query;
@@ -166,34 +160,34 @@ static void * stats_thread_fn(void * arg) {
             head = save;
         }
 
-        while(unlink_head) {
-            struct inode_id id;
-            uint64_t moving_off = 0;
+        while(decref_head) {
             bson cond, doc;
-            struct unlink_stat * next = unlink_head->next;
+            struct decref_stat * next = decref_head->next;
 
-            memcpy(&id.oid, &unlink_head->oid, sizeof(bson_oid_t));
-            while(moving_off < unlink_head->oldsize) {
-                id.start = moving_off;
-                bson_init(&cond);
-                bson_append_binary(&cond, "refs", 0, (char*)&id, sizeof(id));
-                bson_finish(&cond);
+            bson_init(&cond);
+            bson_append_binary(&cond, "_id", 0,
+                (const char*)decref_head->hash, sizeof(decref_head->hash));
+            bson_finish(&cond);
 
-                bson_init(&doc);
-                bson_append_start_object(&doc, "$pull");
-                bson_append_binary(&doc, "refs", 0, (char*)&id, sizeof(id));
-                bson_append_finish_object(&doc);
-                bson_finish(&doc);
+            bson_init(&doc);
+            bson_append_start_object(&doc, "$inc");
+            bson_append_int(&doc, "refs", -1);
+            bson_append_finish_object(&doc);
+            bson_finish(&doc);
 
-                mongo_update(conn, unlink_head->blocks_coll,
-                    &cond, &doc, 0, NULL);
-                bson_destroy(&doc);
-                bson_destroy(&cond);
-                moving_off += unlink_head->blocksize;
-            }
-            free(unlink_head);
-            unlink_head = next;
+            mongo_update(conn, blocks_name, &cond, &doc,
+                MONGO_UPDATE_BASIC, NULL);
+            bson_destroy(&cond);
+            bson_destroy(&doc);
+            decref_head = next;
         }
+
+        bson_init(&rmcond);
+        bson_append_int(&rmcond, "refs", 0);
+        bson_finish(&rmcond);
+
+        mongo_remove(conn, blocks_name, &rmcond, NULL);
+        bson_destroy(&rmcond);
     }
     return NULL;
 }

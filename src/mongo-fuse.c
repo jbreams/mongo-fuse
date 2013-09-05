@@ -39,6 +39,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                struct fuse_file_info *fi);
 int mongo_write(const char *path, const char *buf, size_t size,
                off_t offset, struct fuse_file_info *fi);
+int mongo_rename(const char * path, const char * newpath);
 
 static int mongo_getattr(const char *path, struct stat *stbuf) {
     int res = 0;
@@ -61,37 +62,6 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
     stbuf->st_atime = e.modified;
     stbuf->st_dev = e.dev;
 
-    free_inode(&e);
-    return res;
-}
-
-static int mongo_rename(const char * path, const char * newpath) {
-    struct inode e;
-    struct dirent * nd, *last = NULL;
-    const size_t newpathlen = strlen(newpath);
-    int res;
-
-    if((res = get_inode(path, &e)) != 0)
-        return res;
-
-    struct dirent * d = e.dirents;
-    while(d && strcmp(d->path, path) != 0) {
-        last = d;
-        d = d->next;
-    }
-
-    nd = realloc(d, sizeof(struct dirent) + newpathlen);
-    if(!nd) {
-        free_inode(&e);
-        return -ENOMEM;
-    }
-
-    if(last)
-        last->next = nd;
-    else
-        e.dirents = nd;
-    strcpy(nd->path, newpath);
-    res = commit_inode(&e);
     free_inode(&e);
     return res;
 }

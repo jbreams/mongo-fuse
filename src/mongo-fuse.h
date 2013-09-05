@@ -48,21 +48,14 @@ struct inode {
     int nmaps;
 };
 
-#pragma pack(1)
-struct inode_id {
-    bson_oid_t oid;
-    uint64_t start;
-};
-#pragma pack()
-
 mongo * get_conn();
 void setup_threading();
 void teardown_threading();
 void add_block_stat(const char * path, size_t size, int write);
-void add_unlink(struct inode * e);
 uint32_t round_up_pow2(uint32_t v);
 char * get_compress_buf();
 struct extent * new_extent(struct inode * e);
+void decref_block(const uint8_t hash[20]);
 
 void free_inode(struct inode *e);
 int get_inode(const char * path, struct inode * out);
@@ -71,6 +64,7 @@ int commit_inode(struct inode * e);
 int create_inode(const char * path, mode_t mode, const char * data);
 int check_access(struct inode * e, int amode);
 int read_inode(const bson * doc, struct inode * out);
+int inode_exists(const char * path);
 #if FUSE_VERSION > 28
 int lock_inode(struct inode * e, int writer, bson_date_t * locktime, int noblock);
 int unlock_inode(struct inode * e, int writer, bson_date_t locktime);
@@ -79,7 +73,6 @@ int unlock_inode(struct inode * e, int writer, bson_date_t locktime);
 int commit_extent(struct inode * ent, struct extent *e);
 int resolve_extent(struct inode * e, off_t start,
     struct extent ** realout, int getdata);
-void get_block_collection(struct inode * e, char * name);
 off_t compute_start(struct inode * e, off_t offset);
 int do_trunc(struct inode * e, off_t off);
 int commit_blockmap(struct inode * e, struct block_map *map);

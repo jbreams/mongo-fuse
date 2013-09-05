@@ -122,7 +122,7 @@ cleanup:
     if(res != 0)
         return res;
     else
- //       add_block_stat(path, size, 1);
+        add_block_stat(path, size, 1);
     return size;
 }
 
