@@ -22,9 +22,7 @@ extern const char * inodes_name;
 extern const char * maps_name;
 extern int blocks_name_len;
 
-#define WORD_OFFSET(b) ((b) / 32)
-#define BIT_OFFSET(b)  ((b) % 32)
-static char empty_hash[] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+const char empty_hash[] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
 struct extent * block_cache[BLOCK_CACHE_SIZE];
 pthread_mutex_t block_cache_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -56,6 +54,7 @@ void cache_block(uint8_t hash[20], struct inode * ent, struct extent * e) {
         return;
     }
     memcpy(block_cache[chash], e, sizeof(struct extent) + ent->blocksize);
+    memcpy(block_cache[chash]->hash, hash, 20);
 }
 
 int get_cached_block(uint8_t hash[20], struct inode * ent, struct extent * e) {
@@ -178,7 +177,7 @@ int commit_blockmap(struct inode * e, struct block_map *map) {
         return 0;
 
     bson_init(&cond);
-    bson_append_oid(&cond, "inode", &e->oid);
+    bson_append_oid(&cond, "inode", &map->inode);
     bson_append_long(&cond, "start", map->start);
     bson_finish(&cond);
 

@@ -12,6 +12,9 @@ struct extent {
 #define BLOCKS_PER_MAP 1024
 #define BLOCK_CACHE_SIZE 2048
 
+#define WORD_OFFSET(b) ((b) / 32)
+#define BIT_OFFSET(b)  ((b) % 32)
+
 struct block_map {
     bson_oid_t oid;
     bson_oid_t inode;

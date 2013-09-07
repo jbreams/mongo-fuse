@@ -9,10 +9,12 @@
 #include "mongo-fuse.h"
 #include <osxfuse/fuse.h>
 #include <limits.h>
+#include <time.h>
 
 extern const char * inodes_name;
 extern const char * dbname;
 extern const char * inodes_coll;
+extern char empty_hash[];
 
 struct readdir_data {
     fuse_fill_dir_t filler;
@@ -22,7 +24,7 @@ struct readdir_data {
 int read_dirents(const char * directory,
     int (*dirent_cb)(struct inode *e, void * p,
     const char * parent, size_t parentlen), void * p) {
-    bson query, fields;
+    bson query;
     mongo_cursor curs;
     size_t pathlen = strlen(directory);
     char regexp[PATH_MAX + 10];
@@ -34,51 +36,23 @@ int read_dirents(const char * directory,
     bson_append_regex(&query, "dirents", regexp, "");
     bson_finish(&query);
 
-    bson_init(&fields);
-    bson_append_int(&fields, "data", 0);
-    bson_finish(&fields);
-
     mongo_cursor_init(&curs, conn, inodes_name);
     mongo_cursor_set_query(&curs, &query);
-    mongo_cursor_set_fields(&curs, &fields);
 
     while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
         struct inode e;
-        struct dirent * cde, *last = NULL;
-        const char * filename;
         res = read_inode(mongo_cursor_bson(&curs), &e);
         if(res != 0) {
             fprintf(stderr, "Error in read_inode\n");
             break;
         }
 
-        cde = e.dirents;
-        while(cde) {
-            if(strncmp(cde->path, directory, pathlen) != 0) {
-                last = cde;
-                cde = cde->next;
-                continue;
-            }
-
-            if(last) {
-                last->next = cde->next;
-                cde->next = e.dirents;
-                e.dirents = cde;
-            }
-            break;
-        }
-
-        filename = cde->path + cde->len;
-        while(*(filename - 1) != '/')
-            filename--;
-        if(!(strcmp(filename, ".snapshot") == 0 && e.mode & S_IFDIR))
-            res = dirent_cb(&e, p, directory, pathlen);
+        res = dirent_cb(&e, p, directory, pathlen);
         free_inode(&e);
         if(res != 0)
             break;
     }
     bson_destroy(&query);
-    bson_destroy(&fields);
     mongo_cursor_destroy(&curs);
 
     if(curs.err != MONGO_CURSOR_EXHAUSTED) {
@@ -108,7 +82,16 @@ int readdir_cb(struct inode * e, void * p,
     stbuf.st_atime = e->modified;
     stbuf.st_dev = e->dev;
 
-    rd->filler(rd->buf, e->dirents->path + printlen, &stbuf, 0);
+    struct dirent * cde = e->dirents;
+    while(cde) {
+        if(strncmp(cde->path, parent, parentlen) != 0 ||
+            strcmp(cde->path + printlen, ".snapshot") == 0) {
+            cde = cde->next;
+            continue;
+        }
+        rd->filler(rd->buf, cde->path + printlen, &stbuf, 0);
+        cde = cde->next;
+    }
     return 0;
 }
 
@@ -140,15 +123,19 @@ int mongo_mkdir(const char * path, mode_t mode) {
 int orphan_snapshot(struct inode *e, void * p,
     const char * parent, size_t parentlen) {
     const char * topparent = (const char*)p;
-    const char * shortname = e->dirents->path + e->dirents->len;
+    struct dirent * cde = e->dirents, *desave = NULL;
+    while(cde && strncmp(cde->path, parent, parentlen) != 0) {
+        desave = cde;
+        cde = cde->next;
+    }
+    const char * shortname = cde->path + cde->len;
     int rootlen = strlen(topparent);
     while(topparent[--rootlen] != '/');
     int res, nslashes = 1;
-    struct dirent * save = e->dirents;
 
     if(e->mode & S_IFDIR) {
             nslashes--;
-        if((res = read_dirents(e->dirents->path,
+        if((res = read_dirents(cde->path,
             orphan_snapshot, (void*)topparent)) != 0)
             return res;
     }
@@ -160,6 +147,8 @@ int orphan_snapshot(struct inode *e, void * p,
     }
 
     struct dirent * nd = malloc(sizeof(struct dirent) + PATH_MAX);
+    if(!nd)
+        return -ENOMEM;
     if(strcmp(shortname, ".snapshot") == 0) {
         nd->len = sprintf(nd->path, "/%*.s.snapshot/orphaned-%s",
             rootlen, topparent, topparent + rootlen + 1);
@@ -167,11 +156,17 @@ int orphan_snapshot(struct inode *e, void * p,
         nd->len = sprintf(nd->path, "/%*.s.snapshot/orphaned-%s/%s",
             rootlen, topparent, topparent + rootlen + 1, shortname);
     }
-    free(nd);
-    nd->next = e->dirents->next;
-    e->dirents = nd;
+    nd->next = cde->next;
+    if(desave)
+        desave->next = nd;
+    else
+        e->dirents = nd;
     commit_inode(e);
-    e->dirents = save;
+    if(desave)
+        desave->next = cde;
+    else
+        e->dirents = cde;
+    free(nd);
 
     return 0;
 }
@@ -184,6 +179,9 @@ int mongo_rmdir(const char * path) {
     char regexp[PATH_MAX + 25];
     mongo * conn = get_conn();
 
+    if((res = inode_exists(path)) != 0)
+        return res;
+
     sprintf(regexp, "^%s/[^/]+(?<!\\.snapshot)$", path);
     bson_init(&cond);
     bson_append_regex(&cond, "dirents", regexp, "");
@@ -195,20 +193,30 @@ int mongo_rmdir(const char * path) {
     if(dres > 0)
         return -ENOTEMPTY;
 
-    sprintf(regexp, "%s/.snapshot", path);
-    if((res = get_inode(regexp, &e)) != 0)
-        return res;
+    if(strstr(path, "/.snapshot") == NULL) {
+        sprintf(regexp, "%s/.snapshot", path);
+        if((res = get_inode(regexp, &e)) != 0)
+            return res;
 
-    res = orphan_snapshot(&e, (void*)path, NULL, 0);
-    free_inode(&e);
-    if(res != 0)
-        return res;
+        sprintf(regexp, "^%s/.snapshot/", path);
+        bson_init(&cond);
+        bson_append_regex(&cond, "dirents", regexp, "");
+        bson_finish(&cond);
 
-    if((res = get_inode(path, &e)) != 0)
-        return res;
+        dres = mongo_count(conn, dbname, inodes_coll, &cond);
+        bson_destroy(&cond);
 
+        if(dres > 0) {
+            res = orphan_snapshot(&e, (void*)path, NULL, 0);
+            free_inode(&e);
+            if(res != 0)
+                return res;
+        }
+    }
+
+    sprintf(regexp, "^%s", path);
     bson_init(&cond);
-    bson_append_oid(&cond, "_id", &e.oid);
+    bson_append_regex(&cond, "dirents", regexp, "");
     bson_finish(&cond);
 
     res = mongo_remove(conn, inodes_name, &cond, NULL);
@@ -221,13 +229,13 @@ int mongo_rmdir(const char * path) {
 }
 
 int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen) {
-    int generation = *(int*)p;
     bson_oid_t newid;
     int res;
     const char * path = e->dirents->path;
     size_t pathlen = e->dirents->len;
     char * filename = (char*)path + pathlen;
     uint64_t off = 0;
+    char * generation = (char*)p;
 
     if(e->mode & S_IFDIR)
         return 0;
@@ -241,16 +249,19 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
         struct block_map * map = e->maps[res];
         memcpy(&map->inode, &newid, sizeof(bson_oid_t));
         map->updated = 0;
-        memset(map->changed, 1, sizeof(map->changed));
+        for(int i = 0; i < BLOCKS_PER_MAP; i++) {
+            if(memcmp(map->blocks[i], empty_hash, 20) != 0)
+                map->changed[WORD_OFFSET(off)] |= (1 << BIT_OFFSET(off));
+            off += e->blocksize;
+        }
         if((res = commit_blockmap(e, e->maps[res])) != 0)
             return res;
-        off += BLOCKS_PER_MAP * e->blocksize;
     }
 
     memcpy(&e->oid, &newid, sizeof(bson_oid_t));
 
     struct dirent * d = malloc(sizeof(struct dirent) + pathlen + 21);
-    d->len = sprintf(d->path, "%s/.snapshot/%d/%s", parent, generation, filename);
+    d->len = sprintf(d->path, "%s/.snapshot/%s/%s", parent, generation, filename);
     d->next = NULL;
 
     struct dirent * freeme = e->dirents;
@@ -268,30 +279,24 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
 
 int snapshot_dir(const char * path, size_t pathlen, mode_t mode) {
     char dirpath[PATH_MAX + 1], regexp[PATH_MAX + 1];
-    bson cond;
-    mongo * conn = get_conn();
-    double count;
-    int icount, res;
+    char snapshotname[20];
+    struct tm curtime;
+    time_t curtimet;
+    int res;
 
     strcpy(dirpath, path);
     while(dirpath[pathlen] != '/') pathlen--;
     dirpath[pathlen] = '\0';
 
-    sprintf(regexp, "^%s/.snapshot/\\d+$",
-        pathlen == 1 ? dirpath + 1 : dirpath);
-    bson_init(&cond);
-    bson_append_regex(&cond, "dirents", regexp, "");
-    bson_finish(&cond);
+    curtimet = time(NULL);
+    localtime_r(&curtimet, &curtime);
+    strftime(snapshotname, 20, "%F %T", &curtime);
 
-    count = mongo_count(conn, dbname, "inodes", &cond);
-    bson_destroy(&cond);
-    icount = count + 1;
-
-    sprintf(regexp, "%s/.snapshot/%d", dirpath, icount);
+    sprintf(regexp, "%s/.snapshot/%s", dirpath, snapshotname);
     if((res = create_inode(regexp, mode, NULL)) != 0)
         return res;
 
-    return read_dirents(dirpath, create_snapshot, &icount);
+    return read_dirents(dirpath, create_snapshot, snapshotname);
 }
 
 int mongo_rename(const char * path, const char * newpath) {
@@ -311,6 +316,11 @@ int mongo_rename(const char * path, const char * newpath) {
 
     res = mongo_update(conn, inodes_name, &query, &doc,
         MONGO_UPDATE_BASIC, NULL);
-    return res == MONGO_OK ? 0:-EIO;
+    bson_destroy(&doc);
+    bson_destroy(&query);
+
+    if(res != MONGO_OK)
+        return -EIO;
+    return inode_exists(newpath);
 }
 
