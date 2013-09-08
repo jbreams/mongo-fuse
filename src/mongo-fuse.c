@@ -29,8 +29,6 @@ char * dbname = "test";
 const char * mongo_host = "127.0.0.1";
 int mongo_port = 27017;
 
-extern struct extent * block_cache[];
-
 int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     off_t offset, struct fuse_file_info *fi);
 int mongo_mkdir(const char * path, mode_t mode);
@@ -369,15 +367,8 @@ static struct fuse_operations mongo_oper = {
 
 int main(int argc, char *argv[])
 {
-    int i;
     setup_threading();
-    memset(block_cache, 0, sizeof(struct extent*) * BLOCK_CACHE_SIZE);
     int rc = fuse_main(argc, argv, &mongo_oper, NULL);
     teardown_threading();
-
-    for(i = 0; i < BLOCK_CACHE_SIZE; i++) {
-        if(block_cache[i])
-            free(block_cache[i]);
-    }
     return rc;
 }

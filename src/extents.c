@@ -4,7 +4,7 @@
 #include <fcntl.h>
 #include <mongo.h>
 #include <stdlib.h>
-#include <search.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include "mongo-fuse.h"
 #include <osxfuse/fuse.h>
@@ -15,62 +15,17 @@
 #include <openssl/sha.h>
 #endif
 #include <pthread.h>
+#include <xmmintrin.h>
+#include <assert.h>
 
 extern const char * dbname;
 extern const char * blocks_name;
 extern const char * inodes_name;
 extern const char * maps_name;
+extern const char * blocks_coll;
 extern int blocks_name_len;
 
 const char empty_hash[] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
-
-struct extent * block_cache[BLOCK_CACHE_SIZE];
-pthread_mutex_t block_cache_lock = PTHREAD_MUTEX_INITIALIZER;
-
-void cache_block(uint8_t hash[20], struct inode * ent, struct extent * e) {
-    uint16_t chash = (*(uint16_t*)hash) & (BLOCK_CACHE_SIZE - 1);
-    int hash_offset = 0, cmp_result = 1;
-    const int max_offset = 20 / sizeof(uint16_t);
-    while(hash_offset < max_offset && block_cache[chash] &&
-        (cmp_result = memcmp(hash, block_cache[chash]->hash, 20)) != 0) {
-        hash_offset += sizeof(uint16_t);
-        chash = (*(((uint16_t*)hash) + hash_offset)) & (BLOCK_CACHE_SIZE - 1);
-    }
-
-    if(cmp_result == 0)
-        return;
-
-    if(hash_offset > max_offset) {
-        hash_offset -= sizeof(uint16_t);
-        chash = *(((uint16_t*)hash) + sizeof(uint16_t));
-    }
-
-    if(block_cache[chash])
-        free(block_cache[chash]);
-
-    block_cache[chash] = malloc(sizeof(struct extent) + ent->blocksize);
-    if(!block_cache[chash]) {
-        block_cache[chash] = NULL;
-        return;
-    }
-    memcpy(block_cache[chash], e, sizeof(struct extent) + ent->blocksize);
-    memcpy(block_cache[chash]->hash, hash, 20);
-}
-
-int get_cached_block(uint8_t hash[20], struct inode * ent, struct extent * e) {
-    uint16_t chash = (*(uint16_t*)hash) & (BLOCK_CACHE_SIZE - 1);
-    int hash_offset = 0, cmp_result = 1;
-    const int max_offset = 20/ sizeof(uint16_t);
-    while(hash_offset < max_offset && block_cache[chash] &&
-        (cmp_result = memcmp(hash, block_cache[chash]->hash, 20)) != 0) {
-        hash_offset += sizeof(uint16_t);
-        chash = (*(((uint16_t*)hash) + hash_offset)) & (BLOCK_CACHE_SIZE - 1);
-    }
-
-    if(cmp_result == 0)
-        return chash;
-    return -ENOENT;
-}
 
 off_t compute_start(struct inode * e, off_t offset) {
     return (offset / e->blocksize) * e->blocksize;
@@ -277,14 +232,54 @@ int commit_extent(struct inode * ent, struct extent *e) {
     int res;
     bson doc, cond;
     mongo * conn = get_conn();
-    ssize_t realend = ent->blocksize;
     uint8_t hash[20];
-    uint32_t offset, reallen;
+    uint32_t offset = 0, reallen;
+    int32_t realend = ent->blocksize;
+    char * zlock;
 
+
+    /* Uncomment this for incredibly slow length calculations.
     for(;realend >= 0 && e->data[realend] == '\0'; realend--);
     realend++;
     for(offset = 0; offset < realend && e->data[offset] == 0; offset++);
     offset -= offset > 0 ? 1 : 0;
+    *
+    * The code below uses SSE4 instructions to find the first/last
+    * zero bytes by doing 16-byte comparisons at a time. This should give
+    * a ~16x speed boost on blocks with lots of zero bytes over the dumb
+    * method above.
+    */
+    __m128i zero = _mm_setzero_si128();
+    if(e->data[ent->blocksize - 1] == '\0') {
+        zlock = e->data + ent->blocksize - 16;
+        while(zlock >= e->data) {
+            __m128i x = _mm_loadu_si128((__m128i*)zlock);
+            res = _mm_movemask_epi8(_mm_cmpeq_epi8(zero, x));
+            if(res != 0xffff) {
+                realend = zlock - e->data + 16;
+                while(realend > 0 && e->data[realend] == '\0')
+                    realend--;
+                realend++;
+                break;
+            }
+            zlock -= 16;
+        }
+    }
+    if(e->data[0] == '\0') {
+        zlock = e->data;
+        while(zlock - e->data < realend) {
+            __m128i x = _mm_loadu_si128((__m128i*)zlock);
+            res = _mm_movemask_epi8(_mm_cmpeq_epi8(zero, x));
+            if(res != 0xffff) {
+                offset = zlock - e->data;
+                while(offset < realend && e->data[offset] == '\0')
+                    offset++;
+                offset -= offset > 0 ? 1 :0;
+                break;
+            }
+            zlock += 16;
+        }
+    }
     reallen = realend - offset;
 
     if(reallen == 0) {
@@ -323,22 +318,19 @@ int commit_extent(struct inode * ent, struct extent *e) {
     res = mongo_update(conn, blocks_name, &cond, &doc,
         MONGO_UPDATE_UPSERT, NULL);
     bson_destroy(&doc);
+    bson_destroy(&cond);
 
-    if(res != MONGO_OK && conn->lasterrcode != 11000) {
+    if(res != MONGO_OK) {
         fprintf(stderr, "Error committing block %s\n", conn->lasterrstr);
         return -EIO;
     }
-
-    pthread_mutex_lock(&block_cache_lock);
-    cache_block(hash, ent, e);
-    pthread_mutex_unlock(&block_cache_lock);
 
     return set_block_hash(ent, e->start, hash);
 }
 
 int resolve_extent(struct inode * e, off_t start,
     struct extent ** realout, int getdata) {
-    bson query;
+    bson query, fields;
     int res;
     mongo_cursor curs;
     bson_iterator i;
@@ -347,7 +339,6 @@ int resolve_extent(struct inode * e, off_t start,
     mongo * conn = get_conn();
     struct extent * out = new_extent(e);
     uint8_t hash[20];
-    int foundhash = 0;
 
     if(out == NULL)
         return -ENOMEM;
@@ -355,69 +346,75 @@ int resolve_extent(struct inode * e, off_t start,
     if((res = get_block_hash(e, start, hash)) != 0)
         return res;
 
-    if(!getdata) {
-        if(memcmp(hash, empty_hash, 20) == 0)
-            *realout = NULL;
-        else {
-            memcpy(out->hash, hash, 20);
-            *realout = out;
-        }
-        return 0;
-    }
-
     if(memcmp(hash, empty_hash, sizeof(hash)) == 0) {
         *realout = NULL;
         return 0;
     }
 
-    pthread_mutex_lock(&block_cache_lock);
-    if((res = get_cached_block(hash, e, out)) != -ENOENT) {
-        size_t to_copy = sizeof(struct extent) + e->blocksize;
-        memcpy(out, block_cache[res], to_copy);
-        pthread_mutex_unlock(&block_cache_lock);
+    if(!getdata) {
+        memcpy(out->hash, hash, 20);
+        out->start = start;
+        *realout = out;
+        memset(out->data, 0, e->blocksize);
         return 0;
     }
-    pthread_mutex_unlock(&block_cache_lock);
 
     bson_init(&query);
     bson_append_binary(&query, "_id", 0, (char*)hash, 20);
     bson_finish(&query);
 
+    bson_init(&fields);
+    bson_append_int(&fields, "_id", 0);
+    bson_append_int(&fields, "data", 1);
+    bson_append_int(&fields, "offset", 1);
+    bson_finish(&fields);
+
     mongo_cursor_init(&curs, conn, blocks_name);
     mongo_cursor_set_query(&curs, &query);
+    mongo_cursor_set_fields(&curs, &fields);
     mongo_cursor_set_limit(&curs, 1);
 
-    while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
-        const bson * curbson = mongo_cursor_bson(&curs);
-        size_t outsize = e->blocksize;
-        char * comp_out = get_compress_buf();
-        uint32_t offset;
-
-        bson_iterator_init(&i, curbson);
-        while((bt = bson_iterator_next(&i)) > 0) {
-            key = bson_iterator_key(&i);
-            if(strcmp(key, "_id") == 0) {
-                memcpy(out->hash, bson_iterator_bin_data(&i),
-                    sizeof(out->hash));
-                foundhash = 1;
-            }
-            else if(strcmp(key, "data") == 0) {
-                size_t size = bson_iterator_bin_len(&i);
-                if((res = snappy_uncompress(bson_iterator_bin_data(&i),
-                    size, comp_out, &outsize)) != SNAPPY_OK) {
-                    fprintf(stderr, "Error uncompressing block %d\n", res);
-                    free(out);
-                    return -EIO;
-                }
-            }
-            else if(strcmp(key, "offset") == 0)
-                offset = bson_iterator_int(&i);
-        }
-        out->start = start;
-        memcpy(&out->data + offset, comp_out, outsize);
+    res = mongo_cursor_next(&curs);
+    bson_destroy(&query);
+    bson_destroy(&fields);
+    if(res != MONGO_OK) {
+        mongo_cursor_destroy(&curs);
+        return -EIO;
     }
 
-    bson_destroy(&query);
+    bson_iterator_init(&i, mongo_cursor_bson(&curs));
+    size_t outsize, compsize = 0;
+    const char * compdata = NULL;
+    uint32_t offset = 0;
+
+    while((bt = bson_iterator_next(&i)) > 0) {
+        key = bson_iterator_key(&i);
+        if(strcmp(key, "data") == 0) {
+            compsize = bson_iterator_bin_len(&i);
+            compdata = bson_iterator_bin_data(&i);
+        }
+        else if(strcmp(key, "offset") == 0)
+            offset = bson_iterator_int(&i);
+    }
+
+    if(!compdata) {
+        fprintf(stderr, "No data in block?\n");
+        return -EIO;
+    }
+
+    outsize = e->blocksize - offset;
+    if((res = snappy_uncompress(compdata, compsize,
+        out->data + offset, &outsize)) != SNAPPY_OK) {
+        fprintf(stderr, "Error uncompressing block %d\n", res);
+        return -EIO;
+    }
+    if(offset > 0)
+        memset(out->data, 0, offset);
+    compsize = outsize + offset;
+    if(compsize < e->blocksize)
+        memset(out->data + compsize, 0, e->blocksize - compsize);
+    out->start = start;
+    memcpy(out->hash, hash, 20);
     mongo_cursor_destroy(&curs);
 
     if(curs.err != MONGO_CURSOR_EXHAUSTED) {
@@ -426,7 +423,7 @@ int resolve_extent(struct inode * e, off_t start,
         return -EIO;
     }
 
-    *realout = foundhash ? out : NULL;
+    *realout = out;
     return 0;
 }
 

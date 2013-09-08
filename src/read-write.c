@@ -90,6 +90,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
 
         if(!cur) {
             cur = new_extent(e);
+            memset(cur, 0, sizeof(struct extent) + e->blocksize);
             cur->start = curblock;
         }
 

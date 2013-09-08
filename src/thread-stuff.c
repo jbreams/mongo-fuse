@@ -59,7 +59,7 @@ void add_block_stat(const char * path, size_t size, int write) {
     l_nops = nops++;
     pthread_mutex_unlock(&block_stat_mutex);
 
-    if(l_nops > 100)
+    if(l_nops > 1000)
         pthread_cond_signal(&compute_stats_cond);
 }
 
@@ -71,12 +71,12 @@ void decref_block(const uint8_t hash[20]) {
     memcpy(n->hash, hash, sizeof(n->hash));
 
     pthread_mutex_lock(&block_stat_mutex);
-    n->next = decref_stat_head;;
+    n->next = decref_stat_head;
     decref_stat_head = n;
     l_nops = nops++;
     pthread_mutex_unlock(&block_stat_mutex);
 
-    if(l_nops > 100)
+    if(l_nops > 1000)
         pthread_cond_signal(&compute_stats_cond);
 }
 
@@ -109,7 +109,8 @@ static void * stats_thread_fn(void * arg) {
         decref_stat_head = NULL;
         nops = 0;
         pthread_mutex_unlock(&block_stat_mutex);
-        bson rmcond;
+        bson rmcond, rmdoc;
+        int i = 0;
 
         while(head) {
             bson doc, query;
@@ -160,28 +161,35 @@ static void * stats_thread_fn(void * arg) {
             head = save;
         }
 
+        if(!decref_head)
+            continue;
+
+        bson_init(&rmcond);
+        bson_append_start_object(&rmcond, "_id");
+        bson_append_start_array(&rmcond, "$in");
         while(decref_head) {
-            bson cond, doc;
+            char idxstr[8];
+            bson_numstr(idxstr, i++);
             struct decref_stat * next = decref_head->next;
-
-            bson_init(&cond);
-            bson_append_binary(&cond, "_id", 0,
+            bson_append_binary(&rmcond, idxstr, 0,
                 (const char*)decref_head->hash, sizeof(decref_head->hash));
-            bson_finish(&cond);
-
-            bson_init(&doc);
-            bson_append_start_object(&doc, "$inc");
-            bson_append_int(&doc, "refs", -1);
-            bson_append_finish_object(&doc);
-            bson_finish(&doc);
-
-            mongo_update(conn, blocks_name, &cond, &doc,
-                MONGO_UPDATE_BASIC, NULL);
-            bson_destroy(&cond);
-            bson_destroy(&doc);
+            free(decref_head);
             decref_head = next;
         }
+        bson_append_finish_array(&rmcond);
+        bson_append_finish_object(&rmcond);
+        bson_finish(&rmcond);
 
+        bson_init(&rmdoc);
+        bson_append_start_object(&rmdoc, "$inc");
+        bson_append_int(&rmdoc, "refs", -1);
+        bson_append_finish_object(&rmdoc);
+        bson_finish(&rmdoc);
+
+        mongo_update(conn, blocks_name, &rmcond, &rmdoc,
+            MONGO_UPDATE_MULTI, NULL);
+        bson_destroy(&rmcond);
+        bson_destroy(&rmdoc);
         bson_init(&rmcond);
         bson_append_int(&rmcond, "refs", 0);
         bson_finish(&rmcond);
@@ -244,7 +252,6 @@ struct extent * new_extent(struct inode * e) {
             return NULL;
         td->cursize = e->blocksize;
     }
-    memset(td->extent_buf, 0, sizeof(struct extent) + e->blocksize);
     return td->extent_buf;
 }
 

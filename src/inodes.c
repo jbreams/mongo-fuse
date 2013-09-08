@@ -267,7 +267,7 @@ int choose_block_size(const char * path, size_t len) {
 
     free(parentpath);
     if(blocksize == 0)
-        blocksize = 65536;
+        blocksize = 8192;
     return blocksize;
 }
 
@@ -279,6 +279,7 @@ int create_inode(const char * path, mode_t mode, const char * data) {
 
     res = inode_exists(path);
     if(res == 0) {
+        fprintf(stderr, "%s already exists\n", path);
         return -EEXIST;
     } else if(res == -EIO)
         return -EIO;

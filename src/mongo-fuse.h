@@ -3,14 +3,12 @@
 
 struct extent {
     char hash[20];
-    char foundhash;
-    struct extent * next;
     uint64_t start;
     char data[1];
 };
 
 #define BLOCKS_PER_MAP 1024
-#define BLOCK_CACHE_SIZE 2048
+#define BLOCK_CACHE_SIZE 16
 
 #define WORD_OFFSET(b) ((b) / 32)
 #define BIT_OFFSET(b)  ((b) % 32)
@@ -49,6 +47,8 @@ struct inode {
     size_t datalen;
     struct block_map ** maps;
     int nmaps;
+    struct extent * block_cache[BLOCK_CACHE_SIZE];
+    int bc_last;
 };
 
 mongo * get_conn();
