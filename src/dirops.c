@@ -117,7 +117,12 @@ int mongo_mkdir(const char * path, mode_t mode) {
     if((res = create_inode(path, mode | S_IFDIR, NULL)) != 0)
         return res;
 
-    return create_inode(snapshotdir, mode | S_IFDIR, NULL);
+    res = create_inode(snapshotdir, mode | S_IFDIR, NULL);
+    if(res != 0)
+        return res;
+
+    sprintf(snapshotdir, "%s/.blocksize",  isroot ? path + 1 : path);
+    return create_inode(snapshotdir, S_IFREG | 0644, NULL);
 }
 
 int orphan_snapshot(struct inode *e, void * p,
@@ -182,7 +187,7 @@ int mongo_rmdir(const char * path) {
     if((res = inode_exists(path)) != 0)
         return res;
 
-    sprintf(regexp, "^%s/[^/]+(?<!\\.snapshot)$", path);
+    sprintf(regexp, "^%s/[^/]+$", path);
     bson_init(&cond);
     bson_append_regex(&cond, "dirents", regexp, "");
     bson_finish(&cond);
@@ -190,8 +195,19 @@ int mongo_rmdir(const char * path) {
     dres = mongo_count(conn, dbname, inodes_coll, &cond);
     bson_destroy(&cond);
 
-    if(dres > 0)
+    if(dres > 2)
         return -ENOTEMPTY;
+
+    sprintf(regexp, "%s/.blocksize", path);
+    bson_init(&cond);
+    bson_append_string(&cond, "dirents", regexp);
+    bson_finish(&cond);
+    res = mongo_remove(conn, inodes_name, &cond, NULL);
+    bson_destroy(&cond);
+    if(res != MONGO_OK) {
+        fprintf(stderr, "Error removing blocksize file at %s\n", path);
+        return -EIO;
+    }
 
     if(strstr(path, "/.snapshot") == NULL) {
         sprintf(regexp, "%s/.snapshot", path);
@@ -240,9 +256,11 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
     if(e->mode & S_IFDIR)
         return 0;
 
-    bson_oid_gen(&newid);
     while(*(filename-1) != '/') filename--;
+    if(strcmp(filename, ".blocksize") == 0)
+        return 0;
 
+    bson_oid_gen(&newid);
     while(off < e->size) {
         if((res = get_blockmap(e, off)) < 0)
             return res;

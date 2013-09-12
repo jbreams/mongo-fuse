@@ -67,7 +67,8 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
 static int mongo_open(const char *path, struct fuse_file_info *fi)
 {
     struct inode * e = malloc(sizeof(struct inode));
-    int res;
+    int res, pathlen = strlen(path);
+    char * plock = (char*)path + pathlen;
 
     res = get_inode(path, e);
     if(res != 0) {
@@ -76,6 +77,11 @@ static int mongo_open(const char *path, struct fuse_file_info *fi)
         return res;
     }
     fi->fh = (uintptr_t)e;
+    while(plock != path && *plock != '/')
+        plock--;
+    e->is_blocksizefile = strcmp(plock, "/.blocksize") == 0;
+    e->updated = time(NULL);
+
     return 0;
 }
 

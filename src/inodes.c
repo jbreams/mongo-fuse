@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/file.h>
+#include <limits.h>
 #include <time.h>
 #include "mongo-fuse.h"
 #include <osxfuse/fuse.h>
@@ -246,28 +247,23 @@ int crunch_stats(struct inode * p) {
 
 int choose_block_size(const char * path, size_t len) {
     int blocksize = 0, res;
-    char *parentpath = strdup(path), *ppl = (char*)parentpath + len;
+    char parentpath[PATH_MAX], *ppl = (char*)parentpath + len;
     struct inode parent;
 
-    while(blocksize == 0 && ppl - path > 1) {
-        while(*ppl != '/') ppl--;
-        if(ppl - path > 0)
-            *ppl = '\0';
+    strcpy(parentpath, path);
+    while((ppl - parentpath) > 1 && *ppl != '/') ppl--;
+    *ppl = '\0';
 
-        res = get_inode(parentpath, &parent);
-        if(res != 0 || !(parent.mode & S_IFDIR)) {
-            free_inode(&parent);
-            free(parentpath);
-            return -ENOENT;
-        }
-
-        blocksize = crunch_stats(&parent);
+    res = get_inode(parentpath, &parent);
+    if(res != 0 || !(parent.mode & S_IFDIR)) {
         free_inode(&parent);
+        return -ENOENT;
     }
 
-    free(parentpath);
+    blocksize = parent.blocksize;
+    free_inode(&parent);
     if(blocksize == 0)
-        blocksize = 8192;
+        blocksize = 4096;
     return blocksize;
 }
 

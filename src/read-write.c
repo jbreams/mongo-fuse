@@ -11,8 +11,63 @@
 #include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <assert.h>
+#include <limits.h>
+#include <math.h>
 #include "mongo-fuse.h"
+
+int write_blocksize(struct inode * file, const char * buf, size_t size) {
+    struct inode e;
+    int res, new_blocksize;
+    char dirpath[PATH_MAX];
+    size_t pathlen = file->dirents->len;
+
+    strcpy(dirpath, file->dirents->path);
+    while(pathlen > 1 && dirpath[pathlen] != '/')
+        pathlen--;
+    dirpath[pathlen] = '\0';
+
+    if((res = get_inode(dirpath, &e)) != 0)
+        return res;
+
+    new_blocksize = round_up_pow2(atoi(buf));
+    if(new_blocksize < 4096)
+        new_blocksize = 4096;
+    if(new_blocksize > 1048576)
+        new_blocksize = 1048576;
+
+    e.blocksize = new_blocksize;
+    res = commit_inode(&e);
+    free_inode(&e);
+    if(res != 0)
+        return res;
+
+    file->size = (new_blocksize == 0 ? 1 : (int)(log10(new_blocksize)+1));
+    res = commit_inode(file);
+    if(res != 0)
+        return res;
+    return size;
+}
+
+int read_blocksize(struct inode * file, char * buf, size_t size) {
+    struct inode e;
+    int res;
+    char dirpath[PATH_MAX];
+    size_t pathlen = file->dirents->len;
+    char tempbuf[sizeof("1048576")];
+
+    strcpy(dirpath, file->dirents->path);
+    while(pathlen > 1 && dirpath[pathlen] != '/')
+        pathlen--;
+    dirpath[pathlen] = '\0';
+
+    if((res = get_inode(dirpath, &e)) != 0)
+        return res;
+
+    sprintf(tempbuf, "%d", e.blocksize);
+    memcpy(buf, tempbuf, size);
+    free_inode(&e);
+    return size;
+}
 
 int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                struct fuse_file_info *fi) {
@@ -26,6 +81,8 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     e = (struct inode*)fi->fh;
     if((res = get_cached_inode(path, e)) != 0)
         return res;
+    if(e->is_blocksizefile)
+        return read_blocksize(e, buf, size);
 
     if(e->mode & S_IFDIR)
         return -EISDIR;
@@ -75,6 +132,9 @@ int mongo_write(const char *path, const char *buf, size_t size,
     e = (struct inode*)fi->fh;
     if((res = get_cached_inode(path, e)) != 0)
         return res;
+
+    if(e->is_blocksizefile)
+        write_blocksize(e, buf, size);
 
     if(e->mode & S_IFDIR)
         return -EISDIR;

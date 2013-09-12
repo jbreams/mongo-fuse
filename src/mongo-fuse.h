@@ -20,6 +20,7 @@ struct block_map {
     time_t updated;
     uint32_t changed[BLOCKS_PER_MAP/32];
     uint8_t blocks[BLOCKS_PER_MAP][20];
+    int has_padding;
 };
 
 struct dirent {
@@ -47,8 +48,7 @@ struct inode {
     size_t datalen;
     struct block_map ** maps;
     int nmaps;
-    struct extent * block_cache[BLOCK_CACHE_SIZE];
-    int bc_last;
+    int is_blocksizefile;
 };
 
 mongo * get_conn();

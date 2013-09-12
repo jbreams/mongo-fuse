@@ -42,6 +42,7 @@ struct decref_stat * decref_stat_head = NULL;
 size_t nops = 0, keep_computing_stats = 1;
 
 void add_block_stat(const char * path, size_t size, int write) {
+    return;
     size_t pathlen = strlen(path);
     size_t l_nops;
 

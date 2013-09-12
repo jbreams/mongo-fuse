@@ -78,14 +78,29 @@ int read_blockmap(struct inode * e, int map, off_t start) {
     mongo_cursor_set_limit(&curs, 1);
 
     res = mongo_cursor_next(&curs);
-    bson_destroy(&cond);
 
     if(res != MONGO_OK) {
         mongo_cursor_destroy(&curs);
-        if(curs.err == MONGO_CURSOR_EXHAUSTED)
+        if(curs.err == MONGO_CURSOR_EXHAUSTED) {
+            bson doc;
+            bson_init(&doc);
+            bson_append_start_object(&doc, "$setOnInsert");
+            bson_append_binary(&doc, "padding", 0, get_compress_buf(), 74684);
+            bson_append_start_array(&doc, "blocks");
+            bson_append_finish_array(&doc);
+            bson_append_finish_object(&doc);
+            bson_finish(&doc);
+
+            res = mongo_update(conn, maps_name, &cond, &doc,
+                MONGO_UPDATE_UPSERT, NULL);
+            bson_destroy(&doc);
+            bson_destroy(&cond);
             return map;
+        }
+        bson_destroy(&cond);
         return -EIO;
     }
+    bson_destroy(&cond);
     curbson = mongo_cursor_bson(&curs);
     bson_iterator_init(&i, curbson);
 
@@ -111,6 +126,8 @@ int read_blockmap(struct inode * e, int map, off_t start) {
                 }
             }
         }
+        else if(strcmp(key, "padding") == 0)
+            curmap->has_padding = 1;
     }
     mongo_cursor_destroy(&curs);
     return 0;
@@ -152,6 +169,11 @@ int commit_blockmap(struct inode * e, struct block_map *map) {
     }
 
     bson_append_finish_object(&doc);
+    if(map->has_padding) {
+        bson_append_start_object(&doc, "$unset");
+        bson_append_string(&doc, "padding", "");
+        bson_append_finish_object(&doc);
+    }
     bson_finish(&doc);
 
     res = mongo_update(conn, maps_name, &cond, &doc, MONGO_UPDATE_UPSERT, NULL);
