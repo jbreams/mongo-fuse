@@ -1,4 +1,8 @@
-
+#include <pthread.h>
+#include <stdint.h>
+#define MONGO_HAVE_STDINT
+#include <mongo.h>
+#include <sys/types.h>
 #define FUSE_USE_VERSION 26
 
 struct extent {
@@ -8,6 +12,7 @@ struct extent {
 };
 
 #define BLOCKS_PER_MAP 1024
+#define BLOCKS_PER_EXTENT 512
 #define BLOCK_CACHE_SIZE 16
 
 #define WORD_OFFSET(b) ((b) / 32)
@@ -29,6 +34,14 @@ struct dirent {
     char path[1];
 };
 
+struct enode {
+    int c;
+    struct enode *p, *l, *r, *n;
+    off_t off;
+    size_t len;
+    char hash[20];
+};
+
 struct inode {
     time_t updated;
     bson_oid_t oid;
@@ -46,9 +59,13 @@ struct inode {
     uint64_t writes[8];
     char * data;
     size_t datalen;
-    struct block_map ** maps;
-    int nmaps;
     int is_blocksizefile;
+
+    pthread_mutex_t wr_extent_lock;
+    struct enode * wr_extent_root;
+
+    pthread_rwlock_t rd_extent_lock;
+    struct enode * rd_extent_root;
 };
 
 mongo * get_conn();
@@ -59,6 +76,11 @@ uint32_t round_up_pow2(uint32_t v);
 char * get_compress_buf();
 struct extent * new_extent(struct inode * e);
 void decref_block(const uint8_t hash[20]);
+
+int serialize_extent(struct inode * e);
+int deserialize_extent(struct inode * e, off_t off, size_t len);
+static int resolve_block(struct inode * e, uint8_t hash[20],
+    struct extent * out);
 
 void free_inode(struct inode *e);
 int get_inode(const char * path, struct inode * out);

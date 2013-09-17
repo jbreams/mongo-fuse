@@ -2,7 +2,6 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <mongo.h>
 #include <stdlib.h>
 #include <strings.h>
 #include <sys/stat.h>
@@ -350,104 +349,7 @@ int commit_extent(struct inode * ent, struct extent *e) {
     return set_block_hash(ent, e->start, hash);
 }
 
-int resolve_extent(struct inode * e, off_t start,
-    struct extent ** realout, int getdata) {
-    bson query, fields;
-    int res;
-    mongo_cursor curs;
-    bson_iterator i;
-    bson_type bt;
-    const char * key;
-    mongo * conn = get_conn();
-    struct extent * out = new_extent(e);
-    uint8_t hash[20];
 
-    if(out == NULL)
-        return -ENOMEM;
-
-    if((res = get_block_hash(e, start, hash)) != 0)
-        return res;
-
-    if(memcmp(hash, empty_hash, sizeof(hash)) == 0) {
-        *realout = NULL;
-        return 0;
-    }
-
-    if(!getdata) {
-        memcpy(out->hash, hash, 20);
-        out->start = start;
-        *realout = out;
-        memset(out->data, 0, e->blocksize);
-        return 0;
-    }
-
-    bson_init(&query);
-    bson_append_binary(&query, "_id", 0, (char*)hash, 20);
-    bson_finish(&query);
-
-    bson_init(&fields);
-    bson_append_int(&fields, "_id", 0);
-    bson_append_int(&fields, "data", 1);
-    bson_append_int(&fields, "offset", 1);
-    bson_finish(&fields);
-
-    mongo_cursor_init(&curs, conn, blocks_name);
-    mongo_cursor_set_query(&curs, &query);
-    mongo_cursor_set_fields(&curs, &fields);
-    mongo_cursor_set_limit(&curs, 1);
-
-    res = mongo_cursor_next(&curs);
-    bson_destroy(&query);
-    bson_destroy(&fields);
-    if(res != MONGO_OK) {
-        mongo_cursor_destroy(&curs);
-        return -EIO;
-    }
-
-    bson_iterator_init(&i, mongo_cursor_bson(&curs));
-    size_t outsize, compsize = 0;
-    const char * compdata = NULL;
-    uint32_t offset = 0;
-
-    while((bt = bson_iterator_next(&i)) > 0) {
-        key = bson_iterator_key(&i);
-        if(strcmp(key, "data") == 0) {
-            compsize = bson_iterator_bin_len(&i);
-            compdata = bson_iterator_bin_data(&i);
-        }
-        else if(strcmp(key, "offset") == 0)
-            offset = bson_iterator_int(&i);
-    }
-
-    if(!compdata) {
-        fprintf(stderr, "No data in block?\n");
-        return -EIO;
-    }
-
-    outsize = e->blocksize - offset;
-    if((res = snappy_uncompress(compdata, compsize,
-        out->data + offset, &outsize)) != SNAPPY_OK) {
-        fprintf(stderr, "Error uncompressing block %d\n", res);
-        return -EIO;
-    }
-    if(offset > 0)
-        memset(out->data, 0, offset);
-    compsize = outsize + offset;
-    if(compsize < e->blocksize)
-        memset(out->data + compsize, 0, e->blocksize - compsize);
-    out->start = start;
-    memcpy(out->hash, hash, 20);
-    mongo_cursor_destroy(&curs);
-
-    if(curs.err != MONGO_CURSOR_EXHAUSTED) {
-        fprintf(stderr, "Error getting extents %d", curs.err);
-        free(out);
-        return -EIO;
-    }
-
-    *realout = out;
-    return 0;
-}
 
 int do_trunc(struct inode * e, off_t off) {
     bson cond;
