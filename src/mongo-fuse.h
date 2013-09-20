@@ -8,25 +8,12 @@
 struct extent {
     char hash[20];
     uint64_t start;
+    size_t size;
     char data[1];
 };
 
 #define BLOCKS_PER_MAP 1024
 #define BLOCKS_PER_EXTENT 512
-#define BLOCK_CACHE_SIZE 16
-
-#define WORD_OFFSET(b) ((b) / 32)
-#define BIT_OFFSET(b)  ((b) % 32)
-
-struct block_map {
-    bson_oid_t oid;
-    bson_oid_t inode;
-    uint64_t start;
-    time_t updated;
-    uint32_t changed[BLOCKS_PER_MAP/32];
-    uint8_t blocks[BLOCKS_PER_MAP][20];
-    int has_padding;
-};
 
 struct dirent {
     struct dirent * next;
@@ -63,6 +50,7 @@ struct inode {
 
     pthread_mutex_t wr_extent_lock;
     struct enode * wr_extent_root;
+    time_t wr_extent_updated;
 
     pthread_rwlock_t rd_extent_lock;
     struct enode * rd_extent_root;
@@ -71,16 +59,12 @@ struct inode {
 mongo * get_conn();
 void setup_threading();
 void teardown_threading();
-void add_block_stat(const char * path, size_t size, int write);
-uint32_t round_up_pow2(uint32_t v);
 char * get_compress_buf();
-struct extent * new_extent(struct inode * e);
-void decref_block(const uint8_t hash[20]);
+struct extent * new_extent(size_t datasize);
 
-int serialize_extent(struct inode * e);
+int serialize_extent(struct inode * e, struct enode * root);
 int deserialize_extent(struct inode * e, off_t off, size_t len);
-static int resolve_block(struct inode * e, uint8_t hash[20],
-    struct extent * out);
+int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]);
 
 void free_inode(struct inode *e);
 int get_inode(const char * path, struct inode * out);
@@ -95,13 +79,7 @@ int lock_inode(struct inode * e, int writer, bson_date_t * locktime, int noblock
 int unlock_inode(struct inode * e, int writer, bson_date_t locktime);
 #endif
 
-int commit_extent(struct inode * ent, struct extent *e);
-int resolve_extent(struct inode * e, off_t start,
-    struct extent ** realout, int getdata);
-off_t compute_start(struct inode * e, off_t offset);
 int do_trunc(struct inode * e, off_t off);
-int commit_blockmap(struct inode * e, struct block_map *map);
-int get_blockmap(struct inode * e, off_t pos);
 
 int read_dirents(const char * directory,
     int (*dirent_cb)(struct inode *e, void * p,

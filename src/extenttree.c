@@ -243,7 +243,7 @@ static void remove_range(off_t off, size_t len, struct enode ** root) {
 	}
 }
 
-static int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]) {
+int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]) {
 	struct enode * root = *r, *n = malloc(sizeof(struct enode));
 	if(!n)
 		return -ENOMEM;
@@ -262,7 +262,7 @@ static int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]) 
 	insert_hash_tree(n, r);
 	return 0;
 }
-
+#ifndef TEST
 static void init_new_extent_doc(struct inode * e, struct enode * c, bson * doc) {
 	bson_init(doc);
 	bson_append_new_oid(doc, "_id");
@@ -280,15 +280,14 @@ static void serialize_node(bson * doc, struct enode * n, int idx) {
 	bson_append_finish_object(doc);
 }
 
-int serialize_extent(struct inode * e) {
+int serialize_extent(struct inode * e, struct enode * root) {
 	mongo * conn = get_conn();
 	bson doc, cond;
 	int nhashes = 0, res;
 	off_t last_end = 0, cur_start = 0;
 	struct enode * cur, *prev = NULL;
 
-	pthread_mutex_lock(&e->wr_extent_lock);
-	cur = e->wr_extent_root;
+	cur = root;
 	prev = cur;
 	while(cur) {
 		init_new_extent_doc(e, cur, &doc);
@@ -319,7 +318,6 @@ int serialize_extent(struct inode * e) {
 		res = mongo_insert(conn, extents_name, &doc, NULL);
 		bson_destroy(&doc);
 		if(res != MONGO_OK) {
-			pthread_mutex_unlock(&e->wr_extent_lock);
 			fprintf(stderr, "Error inserting extent\n");
 			return -EIO;
 		}
@@ -337,14 +335,12 @@ int serialize_extent(struct inode * e) {
 		res = mongo_remove(conn, extents_name, &cond, NULL);
 		bson_destroy(&cond);
 		if(res != MONGO_OK) {
-			pthread_mutex_unlock(&e->wr_extent_lock);
 			fprintf(stderr, "Error cleaning up extents\n");
 			return -EIO;
 		}
 
 		nhashes = 0;
 	}
-	pthread_mutex_unlock(&e->wr_extent_lock);
 	return 0;
 }
 
@@ -411,6 +407,49 @@ int deserialize_extent(struct inode * e, off_t off, size_t len) {
 	}
 	mongo_cursor_destroy(&curs);
 	bson_destroy(&cond);
+	//e->rd_extent_updated = now;
 	pthread_rwlock_unlock(&e->rd_extent_lock);
 	return 0;
 }
+#endif
+
+void free_extent_tree(struct enode * root) {
+	if(!root)
+		return;
+	free_extent_tree(root->l);
+	free_extent_tree(root->r);
+	free(root);
+}
+
+#ifdef TEST
+#ifdef __APPLE__
+#include <CommonCrypto/CommonDigest.h>
+#else
+#include <openssl/sha.h>
+#endif
+
+void print_hash(char hash[20]) {
+	printf("%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x",
+		hash[0], hash[1], hash[2], hash[3], hash[4], hash[5],
+		hash[6], hash[7], hash[8], hash[9], hash[10], hash[11],
+		hash[12], hash[13], hash[14], hash[15], hash[16], hash[17],
+		hash[18], hash[19]);
+}
+
+int main() {
+	off_t off = 0;
+	char hash[20];
+	struct enode * root;
+	size_t len = 4096;
+	int i;
+	for(i = 0; i < 100; i++) {
+		printf("%d: %llu %lu ", i, off, len);
+		CC_SHA1(&off, sizeof(off), hash);
+		print_hash(hash);
+		printf("\n");
+		insert_hash(&root, off, len, hash);
+		off = random();
+		len = off & 0xffff;
+	}
+}
+#endif

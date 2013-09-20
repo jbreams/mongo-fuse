@@ -204,14 +204,28 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     return block - buf;
 }
 
-int commit_block(struct inode * ent, struct extent *e) {
+int mongo_write(const char *path, const char *buf, size_t size,
+                off_t offset, struct fuse_file_info *fi)
+{
+    struct inode * e;
     int res;
+    char * block = (char*)buf;
+    const off_t end = size + offset;
+    off_t curblock;
+    size_t tocopy, reallen;
+    int32_t realend = size, blk_offset = 0;
+    char * zlock;
     bson doc, cond;
     mongo * conn = get_conn();
     uint8_t hash[20];
-    uint32_t offset = 0, reallen;
-    int32_t realend = ent->blocksize;
-    char * zlock;
+    time_t now = time(NULL);
+
+    e = (struct inode*)fi->fh;
+    if((res = get_cached_inode(path, e)) != 0)
+        return res;
+
+    if(e->mode & S_IFDIR)
+        return -EISDIR;
 
     /* Uncomment this for incredibly slow length calculations.
     for(;realend >= 0 && e->data[realend] == '\0'; realend--);
@@ -225,14 +239,14 @@ int commit_block(struct inode * ent, struct extent *e) {
     * method above.
     */
     __m128i zero = _mm_setzero_si128();
-    if(e->data[ent->blocksize - 1] == '\0') {
-        zlock = e->data + ent->blocksize - 16;
-        while(zlock >= e->data) {
+    if(buf[size - 1] == '\0') {
+        zlock = (char*)buf + size - 16;
+        while(zlock >= buf) {
             __m128i x = _mm_loadu_si128((__m128i*)zlock);
             res = _mm_movemask_epi8(_mm_cmpeq_epi8(zero, x));
             if(res != 0xffff) {
-                realend = zlock - e->data + 16;
-                while(realend > 0 && e->data[realend] == '\0')
+                realend = zlock - buf + 16;
+                while(realend > 0 && buf[realend] == '\0')
                     realend--;
                 realend++;
                 break;
@@ -241,28 +255,28 @@ int commit_block(struct inode * ent, struct extent *e) {
         }
     }
     if(e->data[0] == '\0') {
-        zlock = e->data;
-        while(zlock - e->data < realend) {
+        zlock = (char*)buf;
+        while(zlock - buf < realend) {
             __m128i x = _mm_loadu_si128((__m128i*)zlock);
             res = _mm_movemask_epi8(_mm_cmpeq_epi8(zero, x));
             if(res != 0xffff) {
-                offset = zlock - e->data;
-                while(offset < realend && e->data[offset] == '\0')
-                    offset++;
-                offset -= offset > 0 ? 1 :0;
+                blk_offset = zlock - buf;
+                while(blk_offset < realend && buf[blk_offset] == '\0')
+                    blk_offset++;
+                blk_offset -= blk_offset > 0 ? 1 : 0;
                 break;
             }
             zlock += 16;
         }
     }
-    reallen = realend - offset;
+    reallen = realend - blk_offset;
     if(reallen == 0)
         return 0;
 
 #ifdef __APPLE__
-    CC_SHA1(e->data, ent->blocksize, hash);
+    CC_SHA1(buf, size, hash);
 #else
-    SHA1((uint8_t*)e->data, ent->blocksize, hash);
+    SHA1(buf, size, hash);
 #endif
 
     bson_init(&cond);
@@ -273,16 +287,14 @@ int commit_block(struct inode * ent, struct extent *e) {
     bson_append_start_object(&doc, "$setOnInsert");
     char * comp_out = get_compress_buf();
     size_t comp_size = snappy_max_compressed_length(reallen);
-    if((res = snappy_compress(e->data + offset, reallen,
+    if((res = snappy_compress(buf + blk_offset, reallen,
         comp_out, &comp_size)) != SNAPPY_OK) {
         fprintf(stderr, "Error compressing input: %d\n", res);
         return -EIO;
     }
     bson_append_binary(&doc, "data", 0, comp_out, comp_size);
     bson_append_int(&doc, "offset", offset);
-    bson_append_finish_object(&doc);
-    bson_append_start_object(&doc, "$inc");
-    bson_append_int(&doc, "refs", 1);
+    bson_append_int(&doc, "size", size);
     bson_append_finish_object(&doc);
     bson_finish(&doc);
 
@@ -296,75 +308,61 @@ int commit_block(struct inode * ent, struct extent *e) {
         return -EIO;
     }
 
-    return 0;
+    pthread_mutex_lock(&e->wr_extent_lock);
+    res = insert_hash(&e->wr_extent_root,
+        offset + blk_offset, reallen, hash);
+    if(res == 0 && now - e->wr_extent_updated > 3)
+        res = serialize_extent(e, e->wr_extent_root);
+    pthread_mutex_unlock(&e->wr_extent_lock);
+    if(res != 0)
+        return res;
+    return size;
 }
 
-/*
-int mongo_write(const char *path, const char *buf, size_t size,
-                off_t offset, struct fuse_file_info *fi)
-{
-    struct inode * e;
+int do_trunc(struct inode * e, off_t off) {
+    bson cond;
     int res;
-    char * block = (char*)buf;
-    const off_t end = size + offset;
-    off_t curblock;
-    size_t tocopy;
-
-    e = (struct inode*)fi->fh;
-    if((res = get_cached_inode(path, e)) != 0)
-        return res;
-
-    if(e->is_blocksizefile)
-        write_blocksize(e, buf, size);
-
+    mongo * conn = get_conn();
+    struct enode * trunc_root = NULL;
+    off_t new_size = off;
     if(e->mode & S_IFDIR)
         return -EISDIR;
 
-    curblock = compute_start(e, offset);
-    while(offset < end) {
-        size_t curblocksize = e->blocksize, sizediff = 0;
-        struct extent * cur = NULL;
-        int getdata = (offset != curblock || end - curblock < e->blocksize);
-        char * elock;
-        if((res = resolve_extent(e, curblock, &cur, getdata)) != 0)
-            goto cleanup;
-
-        if(!cur) {
-            cur = new_extent(e);
-            memset(cur, 0, sizeof(struct extent) + e->blocksize);
-            cur->start = curblock;
-        }
-
-        if(curblock < offset) {
-            sizediff = offset - curblock;
-            elock = cur->data + sizediff;
-            curblocksize = e->blocksize - sizediff;
-        } else
-            elock = cur->data;
-
-        if(end - offset < curblocksize)
-            tocopy = end - offset;
-        else
-            tocopy = curblocksize;
-
-        memcpy(elock, block, tocopy);
-        if((res = commit_extent(e, cur)) != 0)
-            goto cleanup;
-
-        block += tocopy;
-        offset += tocopy;
-        curblock = compute_start(e, offset);
+    if(off > e->size) {
+        e->size = off;
+        return 0;
     }
 
-    if(end > e->size)
-        e->size = end;
-    res = commit_inode(e);
-
-cleanup:
-    if(res != 0)
+    pthread_rwlock_wrlock(&e->rd_extent_lock);
+    free_extent_tree(e->rd_extent_root);
+    e->rd_extent_root = NULL;
+    if((res = deserialize_extent(e, 0, off)) != 0) {
+        pthread_rwlock_unlock(&e->rd_extent_lock);
         return res;
-    else
-        add_block_stat(path, size, 1);
-    return size;
+    }
+
+    bson_init(&cond);
+    bson_append(&cond, "inode", &e->oid);
+    bson_finish(&cond);
+
+    res = mongo_remove(cond, extents_name, &cond, NULL);
+    bson_destroy(&cond)
+    if(res != 0) {
+        pthread_rwlock_unlock(&e->rd_extent_lock);
+        fprintf(stderr, "Error removing extents in do_truncate\n");
+        return -EIO;
+    }
+
+    if((res = serialize_extent(e, e->rd_extent_root)) != 0) {
+        pthread_rwlock_unlock(&e->rd_extent_lock);
+        fprintf(stderr, "Error updating extents in do_truncate\n");
+        return -EIO;
+    }
+    pthread_mutex_lock(&e->wr_extent_lock);
+    free_extent_tree(&e->wr_extent_root);
+    e->wr_extent_root = NULL;
+    pthread_mutex_unlock(&e->wr_extent_lock);
+    pthread_rwlock_unlock(&e->rd_extent_lock);
+
+    return 0;
 }
-*/
