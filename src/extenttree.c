@@ -8,448 +8,230 @@
 #define BLACK 0
 #define RED 1
 #define NC(n) (n == NULL ? BLACK : n->c)
+#define IS_RED(n) (n && n->c == RED)
 
-extern char * extents_name;
+struct enode * rotate_single(struct enode * root, int dir) {
+	struct enode * save = root->links[!dir];
 
-static struct enode * grandparent(struct enode * n) {
-	if(n && n->p)
-		return n->p->p;
-	return NULL;
+	root->links[!dir] = save->links[dir];
+	save->links[dir] = root;
+
+	root->c = RED;
+	save->c = BLACK;
+
+	return save;
 }
 
-static struct enode * uncle(struct enode * n) {
-	struct enode * g = grandparent(n);
-	if(!g)
+struct enode * rotate_double(struct enode * root, int dir) {
+	root->links[!dir] = rotate_single(root->links[!dir], !dir);
+	return rotate_single(root, dir);
+}
+
+int remove_one_node(struct enode ** root, off_t off) {
+	if(!*root)
+		return 0;
+
+	struct enode head = {0};
+	struct enode * q, *p = NULL, *g = NULL, *f = NULL;
+	int dir = 1;
+
+	q = &head;
+	q->links[RIGHT] = *root;
+
+	while(q->links[dir] != NULL) {
+		int last = dir;
+
+		g = p;
+		p = q;
+		q = q->links[dir];
+		dir = q->off < off;
+
+		if(q->off == off)
+			f = q;
+
+		if(!IS_RED(q) && !IS_RED(q->links[dir])) {
+			if(IS_RED(q->links[!dir]))
+				p = p->links[last] = rotate_single(q, dir);
+			else if(!IS_RED(q->links[!dir])) {
+				struct enode * s = p->links[!last];
+
+				if(s == NULL)
+					continue;
+
+				if(!IS_RED(s->links[!last]) && !IS_RED(s->links[last])) {
+					p->c = BLACK;
+					s->c = RED;
+					q->c = RED;
+				} else {
+					int dir2 = g->links[RIGHT] == p;
+
+					if(IS_RED(s->links[last]))
+						g->links[dir2] = rotate_double(p, last);
+					else if(IS_RED(s->links[!last]))
+						g->links[dir2] = rotate_single(p, last);
+
+					q->c = g->links[dir2]->c = RED;
+					g->links[dir2]->links[LEFT]->c = BLACK;
+					g->links[dir2]->links[RIGHT]->c = BLACK;
+				}
+			}
+		}
+	}
+
+	if(f != NULL) {
+		f->off = q->off;
+		f->len = q->len;
+		memcpy(f->hash, q->hash, 20);
+		p->links[p->links[RIGHT] == q] = q->links[q->links[LEFT] == NULL];
+		free(q);
+	}
+
+	*root = head.links[RIGHT];
+	if(*root != NULL)
+		(*root)->c =BLACK;
+	return f == NULL;
+}
+
+struct enode * start_iter(struct enode_iter * trav,
+	struct enode * root, off_t off) {
+	trav->root = trav->cur = root;
+	trav->top = 0;
+	if(!root)
 		return NULL;
-	if(n->p == g->l)
-		return g->r;
-	return g->l;
-}
-
-static struct enode * sibling(struct enode * n) {
-	struct enode * p = n->p;
-	if(n == p->l)
-		return p->r;
-	return p->l;
-}
-
-struct enode * find_node(struct enode * root, off_t offset) {
-	struct enode * f = root;
-	while(f && f->off != offset) {
-		if(offset < f->off)
-			f = f->l;
-		else if(offset > f->off)
-			f = f->r;
+	while(trav->cur->links[LEFT] != NULL && trav->cur->off > off) {
+		trav->path[trav->top++] = trav->cur;
+		trav->cur = trav->cur->links[LEFT];
 	}
-	return f;
+	return trav->cur;
 }
 
-static void replace_node(struct enode * o, struct enode * n, struct enode ** root) {
-	if(o->p == NULL) {
-		*root = n;
-	} else {
-		if(o == o->p->l)
-			o->p->l = n;
-		else
-			o->p->r = n;
-	}
-	if(n)
-		n->p = o->p;
-}
+struct enode * iter_next(struct enode_iter * trav) {
+	if(trav->cur->links[RIGHT] != NULL) {
+		trav->path[trav->top++] = trav->cur;
+		trav->cur = trav->cur->links[RIGHT];
 
-static void rotate_left(struct enode * n, struct enode ** root) {
-	struct enode * r = n->r;
-	replace_node(n, r, root);
-	n->r = n->l;
-	if(r->l)
-		r->l->p = n;
-	r->l = n;
-	n->p = r;
-}
-
-static void rotate_right(struct enode * n, struct enode ** root) {
-	struct enode * l = n->l;
-	replace_node(n, l, root);
-	n->l = l->r;
-	if(l->r)
-		l->r->p = n;
-	l->r = n;
-	n->p = l;
-}
-
-static void insert_cases(struct enode * n, struct enode ** root) {
-	// case 1
-	if(!n->p) {
-		n->c = BLACK;
-		return;
-	}
-	// case 2
-	if(n->p->c == BLACK)
-		return;
-	// case 3
-	struct enode * u = uncle(n), *g;
-	if(u && u->c == RED) {
-		n->p->c = BLACK;
-		u->c = BLACK;
-		g = grandparent(n);
-		g->c = RED;
-		insert_cases(g, root);
-	} else {
-		// case 4
-		g = grandparent(n);
-		if((n == n->p->r) && (n->p = g->l)) {
-			rotate_left(n->p, root);
-			n = n->l;
+		while(trav->cur->links[LEFT] != NULL) {
+			trav->path[trav->top++] = trav->cur;
+			trav->cur = trav->cur->links[LEFT];
 		}
-		else if((n == n->p->l) && (n->p == g->r)) {
-			rotate_right(n->p, root);
-			n = n->r;
-		}
-
-		// case 5
-		g = grandparent(n);
-		n->p->c = BLACK;
-		g->c = RED;
-		if(n == n->p->l)
-			rotate_right(g, root);
-		else
-			rotate_left(g, root);
 	}
-}
-
-static void insert_hash_tree(struct enode * n, struct enode ** root) {
-	struct enode * r = *root;
-	while(1) {
-		if(n->off < r->off) {
-			if(r->l == NULL) {
-				r->l = n;
+	else {
+		struct enode * last;
+		do {
+			if(trav->top == 0) {
+				trav->cur = NULL;
 				break;
-			} else
-				r = r->l;
-		}
-		else {
-			if(r->r == NULL) {
-				r->r = n;
-				break;
-			} else
-				r = r->r;
- 		}
-	}
-	n->p = r;
-	insert_cases(n, root);
-}
-
-static void delete_cases(struct enode * n, struct enode ** root) {
-	if(!n->p) // case 1
-		return;
-	// case 2
-	struct enode * s = sibling(n);
-	if(s->c == RED) {
-		n->p->c = RED;
-		s->c = BLACK;
-		if(n == n->p->l)
-			rotate_left(n->p, root);
-		else
-			rotate_right(n->p, root);
-	}
-	s = sibling(n);
-	if(NC(s) == BLACK && NC(s->l) == BLACK && NC(s->r) == BLACK) {
-		if(n->p->c == BLACK) { // case 3
-			s->c = RED;
-			delete_cases(n->p, root);
-		} else { // case 4
-			s->c = RED;
-			n->p->c = BLACK;
-		}
-	} else { // case 5
-		s = sibling(n);
-		if(NC(s) == BLACK && NC(s->l) == RED && NC(s->r) == BLACK) {
-			if(n == n->p->l) { 
-				s->c = RED;
-				s->l->c = BLACK;
-				rotate_right(s, root);
 			}
-			else if(n == n->p->r) {
-				s->c = RED;
-				s->r->c = BLACK;
-				rotate_left(s, root);
-			}
-		}
-		// case 6
-		s = sibling(n);
-		s->c = NC(n->p);
-		n->p->c = BLACK;
-		if(n == n->p->l) {
-			s->r->c = BLACK;
-			rotate_left(n->p, root);
-		}
-		else {
-			s->l->c = BLACK;
-			rotate_right(n->p, root);
-		}
+
+			last = trav->cur;
+			trav->cur = trav->path[--trav->top];
+		} while(last == trav->cur->links[RIGHT]);
 	}
+
+	return trav->cur;
 }
 
-static void remove_one_node(struct enode * n, struct enode ** root) {
-	struct enode * c = (n->r == NULL || (n->r->l == NULL && n->r->r == NULL)) ?
-		n->l : n->r;
-	replace_node(n, c, root);
-	if(n->c == BLACK) {
-		if(c->c == RED)
-			c->c = BLACK;
-		else
-			delete_cases(c, root);
-	}
-	free(n);
-}
-
-static void remove_range(off_t off, size_t len, struct enode ** root) {
-	struct enode * n = find_node(*root, off);
-	if(!n)
+void remove_range(off_t off, size_t len, struct enode ** root) {
+	struct enode_iter it;
+	struct enode * n, *h = NULL;
+	off_t end;
+	if(!*root)
 		return;
 
-	if(n == *root) {
+	n = *root;
+	if(!n->links[0] && !n->links[1]) {
 		free(*root);
 		*root = NULL;
 		return;
 	}
 
-	off_t end = off + len;
-	struct enode * rmhead = NULL, *c = n, *prev = NULL, *next;
-	while(c && c->off + c->len < end) {
-		if(c != n && prev == c->p) {
-			next = c->l;
-			if(!next) {
-				c->n = rmhead;
-				rmhead = c;
-				next = c->r ? c->r : c->p;
-			}
-		}
-		else if(prev == c->l) {
-			c->n = rmhead;
-			rmhead = c;
-			next = c->r ? c->r : c->p;
-		}
-		else if(prev == c->r)
-			next = c->p;
-		prev = c;
-		c = next;
+	n = start_iter(&it, *root, off);
+	end = off + len;
+
+	while(n->off < off)
+		n = iter_next(&it);
+
+	if(n->off + n->len > end)
+		return;
+
+	while(n && n->off + n->len < end) {
+		n->n = h;
+		h = n;
+		n = iter_next(&it);
 	}
 
-	while(rmhead) {
-		next = rmhead->n;
-		remove_one_node(rmhead, root);
-		rmhead = next;
+	while(h) {
+		n = h->n;
+		remove_one_node(root, h->off);
+		h = n;
 	}
 }
 
 int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]) {
-	struct enode * root = *r, *n = malloc(sizeof(struct enode));
-	if(!n)
-		return -ENOMEM;
-	memset(n, 0, sizeof(struct enode));
-	n->off = off;
-	n->len = len;
-	memcpy(n->hash, hash, 20);
-
-	if(!root) {
-		*r = n;
+	if(*r == NULL) {
+		struct enode * nr = malloc(sizeof(struct enode));
+		memset(nr, 0, sizeof(struct enode));
+		nr->off = off;
+		nr->len = len;
+		nr->c = BLACK;
+		memcpy(nr->hash, hash, 20);
+		*r = nr;
 		return 0;
 	}
 
-	remove_range(off, len, r);
-	n->c = RED;
-	insert_hash_tree(n, r);
-	return 0;
-}
-#ifndef TEST
-static void init_new_extent_doc(struct inode * e, struct enode * c, bson * doc) {
-	bson_init(doc);
-	bson_append_new_oid(doc, "_id");
-	bson_append_oid(doc, "inode", &e->oid);
-	bson_append_long(doc, "start", c->off);
-	bson_append_start_array(doc, "blocks");
-}
+	struct enode head = {0};
+	struct enode *g, *t, *p, *q;
+	int dir = LEFT, last;
 
-static void serialize_node(bson * doc, struct enode * n, int idx) {
-	char idxstr[10];
-	bson_numstr(idxstr, idx);
-	bson_append_start_object(doc, idxstr);
-	bson_append_binary(doc, "hash", 0, n->hash, 20);
-	bson_append_int(doc, "len", n->len);
-	bson_append_finish_object(doc);
-}
+	t = &head;
+	g = p = NULL;
+	q = t->links[RIGHT] = *r;
 
-int serialize_extent(struct inode * e, struct enode * root) {
-	mongo * conn = get_conn();
-	bson doc, cond;
-	int nhashes = 0, res;
-	off_t last_end = 0, cur_start = 0;
-	struct enode * cur, *prev = NULL;
-
-	cur = root;
-	prev = cur;
-	while(cur) {
-		init_new_extent_doc(e, cur, &doc);
-		cur_start = cur->off;
-		while(cur && cur->off != last_end && nhashes < BLOCKS_PER_EXTENT) {
-			struct enode * next;
-			if(prev == cur->p) {
-				next = cur->l;
-				if(!next) {
-					serialize_node(&doc, cur, nhashes++);
-					next = cur->r ? cur->r : cur->p;
-				}
-			}
-			else if(prev == cur->l) {
-				serialize_node(&doc, cur, nhashes++);
-				next = cur->r ? cur->r : cur->p;
-			}
-			else if(prev == cur->r)
-				next = cur->p;
-			prev = cur;
-			last_end = cur->off + cur->len;
-			cur = next;
+	for(;;) {
+		if(q == NULL) {
+			p->links[dir] = q = malloc(sizeof(struct enode));
+			if(!q)
+				return -ENOMEM;
+			q->off = off;
+			q->len = len;
+			memcpy(q->hash, hash, 20);
 		}
-		bson_append_finish_array(&doc);
-		bson_append_long(&doc, "end", last_end);
-		bson_finish(&doc);
-
-		res = mongo_insert(conn, extents_name, &doc, NULL);
-		bson_destroy(&doc);
-		if(res != MONGO_OK) {
-			fprintf(stderr, "Error inserting extent\n");
-			return -EIO;
+		else if(IS_RED(q->links[LEFT]) && IS_RED(q->links[RIGHT])) {
+			q->c = RED;
+			q->links[LEFT]->c = BLACK;
+			q->links[RIGHT]->c = BLACK;
 		}
 
-		bson_init(&cond);
-		bson_append_oid(&cond, "inode", &e->oid);
-		bson_append_start_object(&cond, "start");
-		bson_append_long(&cond, "$gte", cur_start);
-		bson_append_finish_object(&cond);
-		bson_append_start_object(&cond, "end");
-		bson_append_long(&cond, "$lte", last_end);
-		bson_append_finish_object(&cond);
-		bson_finish(&cond);
-
-		res = mongo_remove(conn, extents_name, &cond, NULL);
-		bson_destroy(&cond);
-		if(res != MONGO_OK) {
-			fprintf(stderr, "Error cleaning up extents\n");
-			return -EIO;
+		if(IS_RED(q) && IS_RED(p)) {
+			int dir2 = t->links[RIGHT] == g;
+			if(q == p->links[last])
+				t->links[dir2] = rotate_single(g, !last);
+			else
+				t->links[dir2] = rotate_double(g, !last);
 		}
 
-		nhashes = 0;
+		if(q->off == off)
+			break;
+
+		last = dir;
+		dir = q->off < off;
+
+		if(g != NULL)
+			t = g;
+		g = p;
+		p = q;
+		q = q->links[dir];
 	}
+
+	*r = head.links[RIGHT];
+	(*r)->c = BLACK;
 	return 0;
 }
-
-int deserialize_extent(struct inode * e, off_t off, size_t len) {
-	bson cond;
-	mongo * conn = get_conn();
-	mongo_cursor curs;
-	int res;
-
-	bson_init(&cond);
-	bson_append_start_object(&cond, "$query");
-	bson_append_oid(&cond, "inode", &e->oid);
-	bson_append_start_object(&cond, "start");
-	bson_append_long(&cond, "$lte", off);
-	bson_append_finish_object(&cond);
-	bson_append_start_object(&cond, "end");
-	bson_append_long(&cond, "$gte", off + len);
-	bson_append_finish_object(&cond);
-	bson_append_finish_object(&cond);
-	bson_append_start_object(&cond, "$orderby");
-	bson_append_int(&cond, "start", 1);
-	bson_append_int(&cond, "_id", 1);
-	bson_append_finish_object(&cond);
-	bson_finish(&cond);
-
-	mongo_cursor_init(&curs, conn, extents_name);
-	mongo_cursor_set_query(&curs, &cond);
-
-	pthread_rwlock_wrlock(&e->rd_extent_lock);
-	while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
-		const bson * curdoc = mongo_cursor_bson(&curs);
-		bson_iterator topi, i, sub;
-		bson_type bt;
-		off_t curoff = 0;
-		const char * key;
-		bson_iteartor_init(&topi, curdoc);
-		while(bson_iterator_next(&topi) != 0) {
-			key = bson_iterator_key(&topi);
-			if(strcmp(key, "blocks") == 0)
-				bson_iterator_subiterator(&topi, &i);
-			else if(strcmp(key, "start") == 0)
-				curoff = bson_iterator_long(&topi);
-		}
-
-		while(bson_iterator_next(&i) != 0) {
-			bson_iterator_subiterator(&i, &sub);
-			char * hash = NULL;
-			int len = 0;
-			while(bson_iterator_next(&sub) != 0) {
-				key = bson_iterator_key(&sub);
-				if(strcmp(key, "hash") == 0)
-					hash = (char*)bson_iterator_bin_data(&sub);
-				else if(strcmp(key, "len") == 0)
-					len = bson_iterator_int(&sub);
-			}
-			if((res = insert_hash(&e->rd_extent_root,
-				curoff, len, hash)) != 0) {
-				fprintf(stderr, "Error adding hash to extent tree\n");
-				pthread_rwlock_unlock(&e->rd_extent_lock);
-				return res;
-			}
-			curoff += len;
-		}
-	}
-	mongo_cursor_destroy(&curs);
-	bson_destroy(&cond);
-	//e->rd_extent_updated = now;
-	pthread_rwlock_unlock(&e->rd_extent_lock);
-	return 0;
-}
-#endif
 
 void free_extent_tree(struct enode * root) {
 	if(!root)
 		return;
-	free_extent_tree(root->l);
-	free_extent_tree(root->r);
+	free_extent_tree(root->links[LEFT]);
+	free_extent_tree(root->links[RIGHT]);
 	free(root);
 }
-
-#ifdef TEST
-#ifdef __APPLE__
-#include <CommonCrypto/CommonDigest.h>
-#else
-#include <openssl/sha.h>
-#endif
-
-void print_hash(char hash[20]) {
-	printf("%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x",
-		hash[0], hash[1], hash[2], hash[3], hash[4], hash[5],
-		hash[6], hash[7], hash[8], hash[9], hash[10], hash[11],
-		hash[12], hash[13], hash[14], hash[15], hash[16], hash[17],
-		hash[18], hash[19]);
-}
-
-int main() {
-	off_t off = 0;
-	char hash[20];
-	struct enode * root;
-	size_t len = 4096;
-	int i;
-	for(i = 0; i < 100; i++) {
-		printf("%d: %llu %lu ", i, off, len);
-		CC_SHA1(&off, sizeof(off), hash);
-		print_hash(hash);
-		printf("\n");
-		insert_hash(&root, off, len, hash);
-		off = random();
-		len = off & 0xffff;
-	}
-}
-#endif

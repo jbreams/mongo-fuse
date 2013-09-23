@@ -12,8 +12,9 @@ struct extent {
     char data[1];
 };
 
-#define BLOCKS_PER_MAP 1024
-#define BLOCKS_PER_EXTENT 512
+#define TREE_HEIGHT_LIMIT 64
+#define LEFT 0
+#define RIGHT 1
 
 struct dirent {
     struct dirent * next;
@@ -23,10 +24,17 @@ struct dirent {
 
 struct enode {
     int c;
-    struct enode *p, *l, *r, *n;
+    struct enode *links[2], *n;
     off_t off;
     size_t len;
     char hash[20];
+};
+
+struct enode_iter {
+    struct enode * root;
+    struct enode * cur;
+    size_t top;
+    struct enode * path[TREE_HEIGHT_LIMIT];
 };
 
 struct inode {
@@ -42,11 +50,8 @@ struct inode {
     time_t created;
     time_t modified;
     uint32_t blocksize;
-    uint64_t reads[8];
-    uint64_t writes[8];
     char * data;
     size_t datalen;
-    int is_blocksizefile;
 
     pthread_mutex_t wr_extent_lock;
     struct enode * wr_extent_root;
@@ -62,9 +67,15 @@ void teardown_threading();
 char * get_compress_buf();
 struct extent * new_extent(size_t datasize);
 
+void remove_range(off_t off, size_t len, struct enode ** root);
+struct enode * iter_next(struct enode_iter * trav);
+struct enode * start_iter(struct enode_iter * trav,
+    struct enode * root, off_t off);
+void free_extent_tree(struct enode * root);
+int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]);
+
 int serialize_extent(struct inode * e, struct enode * root);
 int deserialize_extent(struct inode * e, off_t off, size_t len);
-int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]);
 
 void free_inode(struct inode *e);
 int get_inode(const char * path, struct inode * out);
