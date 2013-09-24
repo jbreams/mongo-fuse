@@ -22,10 +22,10 @@
 #include <xmmintrin.h>
 
 extern char * blocks_name;
+extern char * extents_name;
 
-static int resolve_block(struct inode * e, uint8_t hash[20],
-    struct extent * out) {
-    bson query, fields;
+static int resolve_block(struct inode * e, uint8_t hash[20], char * buf) {
+    bson query;
     int res;
     mongo_cursor curs;
     bson_iterator i;
@@ -33,27 +33,16 @@ static int resolve_block(struct inode * e, uint8_t hash[20],
     const char * key;
     mongo * conn = get_conn();
 
-    if(out == NULL)
-        return -ENOMEM;
-
     bson_init(&query);
     bson_append_binary(&query, "_id", 0, (char*)hash, 20);
     bson_finish(&query);
 
-    bson_init(&fields);
-    bson_append_int(&fields, "_id", 0);
-    bson_append_int(&fields, "data", 1);
-    bson_append_int(&fields, "offset", 1);
-    bson_finish(&fields);
-
     mongo_cursor_init(&curs, conn, blocks_name);
     mongo_cursor_set_query(&curs, &query);
-    mongo_cursor_set_fields(&curs, &fields);
     mongo_cursor_set_limit(&curs, 1);
 
     res = mongo_cursor_next(&curs);
     bson_destroy(&query);
-    bson_destroy(&fields);
     if(res != MONGO_OK) {
         mongo_cursor_destroy(&curs);
         return -EIO;
@@ -62,7 +51,7 @@ static int resolve_block(struct inode * e, uint8_t hash[20],
     bson_iterator_init(&i, mongo_cursor_bson(&curs));
     size_t outsize, compsize = 0;
     const char * compdata = NULL;
-    uint32_t offset = 0;
+    uint32_t offset = 0, size = 0;
 
     while((bt = bson_iterator_next(&i)) > 0) {
         key = bson_iterator_key(&i);
@@ -72,6 +61,13 @@ static int resolve_block(struct inode * e, uint8_t hash[20],
         }
         else if(strcmp(key, "offset") == 0)
             offset = bson_iterator_int(&i);
+        else if(strcmp(key, "size") == 0)
+            size = bson_iterator_int(&i);
+    }
+
+    if(curs.err != MONGO_CURSOR_EXHAUSTED) {
+        fprintf(stderr, "Error getting extents %d", curs.err);
+        return -EIO;
     }
 
     if(!compdata) {
@@ -81,22 +77,16 @@ static int resolve_block(struct inode * e, uint8_t hash[20],
 
     outsize = e->blocksize - offset;
     if((res = snappy_uncompress(compdata, compsize,
-        out->data + offset, &outsize)) != SNAPPY_OK) {
+        buf + offset, &outsize)) != SNAPPY_OK) {
         fprintf(stderr, "Error uncompressing block %d\n", res);
         return -EIO;
     }
     if(offset > 0)
-        memset(out->data, 0, offset);
+        memset(buf, 0, offset);
     compsize = outsize + offset;
-    if(compsize < e->blocksize)
-        memset(out->data + compsize, 0, e->blocksize - compsize);
+    if(compsize < size)
+        memset(buf + compsize, 0, size - compsize);
     mongo_cursor_destroy(&curs);
-
-    if(curs.err != MONGO_CURSOR_EXHAUSTED) {
-        fprintf(stderr, "Error getting extents %d", curs.err);
-        free(out);
-        return -EIO;
-    }
 
     return 0;
 }
@@ -105,11 +95,13 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                struct fuse_file_info *fi) {
     struct inode * e;
     int res;
-    struct extent * o;
     char * block = buf;
-    size_t tocopy;
     const off_t end = size + offset;
-    struct enode * cur, *next = NULL, *prev = NULL, *start;
+    off_t last_end = 0;
+    size_t tocopy;
+    struct enode * cur;
+    struct enode_iter iter;
+    char * extent_buf = get_extent_buf();
 
     e = (struct inode*)fi->fh;
     if((res = get_cached_inode(path, e)) != 0)
@@ -125,73 +117,43 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         return res;
 
     pthread_rwlock_rdlock(&e->rd_extent_lock);
-    cur = e->rd_extent_root;
-    while(cur) {
-        if(offset == cur->off)
-            break;
-        if(offset < cur->off) {
-            if(cur->off + cur->len > offset)
-                break;
-            cur = cur->l;
-        }
-        else if(offset > cur->off)
-            cur = cur->r;
-    }
-    if(!cur) {
-        pthread_rwlock_unlock(&e->rd_extent_lock);
-        memset(buf, 0, size);
-        return size;
-    }
+    cur = start_iter(&iter, e->rd_extent_root, offset);
 
-    o = new_extent(e);
-    start = cur;
     while(block - buf != size) {
+        size_t copy_offset = 0;
         if(!cur || cur->off > end)
             break;
-        if(start == cur) {
-            if((res = resolve_block(e, (char*)cur->hash, o)) != 0) {
+
+        if(cur->off + cur->len < offset) {
+            cur = iter_next(&iter);
+            continue;
+        }
+
+        if(last_end > 0 && cur->off != last_end) {
+            tocopy = cur->off - last_end;
+            memset(block, 0, tocopy);
+            block += tocopy;
+        }
+
+        copy_offset = offset - cur->off;
+        tocopy = cur->len - copy_offset;
+        if(cur->empty) {
+            memset(block, 0, tocopy);
+            block += tocopy;
+            offset += tocopy;
+        } else {
+            res = resolve_block(e, cur->hash, extent_buf);
+            if(res != 0) {
                 pthread_rwlock_unlock(&e->rd_extent_lock);
                 return res;
             }
-            char * elock = o->data + (offset - cur->off);
-            tocopy = cur->len - (offset - cur->off);
-            memcpy(block, elock, tocopy);
+            memcpy(block, extent_buf + copy_offset, tocopy);
             block += tocopy;
             offset += tocopy;
-            prev = cur;
-            next = cur->r ? cur->r : cur->p;
-            continue;
-        }
-        if(prev == cur->p) {
-            next = cur->l;
-            if(!next)
-                next = cur->r ? cur->r : cur->p;
-        }
-        else if(prev == cur->l)
-            next = cur->r ? cur->r : cur->p;
-        else if(prev == cur->r) {
-            prev = cur;
-            cur = cur->p;
-            continue;
         }
 
-        if(cur->off != offset) {
-            memset(block, 0, offset - cur->off);
-            block += offset - cur->off;
-            offset += offset - cur->off;
-        }
-
-        if((res = resolve_block(e, (char*)cur->hash, o)) != 0) {
-            pthread_rwlock_unlock(&e->rd_extent_lock);
-            return res;
-        }
-        if(cur->off + cur->len > end)
-            tocopy = end - (cur->off + cur->len);
-        else
-            tocopy = cur->len;
-        memcpy(block, o->data, tocopy);
-        prev = cur;
-        cur = next;
+        last_end = cur->off + cur->len;
+        cur = iter_next(&iter);
     }
 
     if(block - buf != size) {
@@ -200,6 +162,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         block += tocopy;
         offset += tocopy;
     }
+    pthread_rwlock_unlock(&e->rd_extent_lock);
 
     return block - buf;
 }
@@ -209,10 +172,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
 {
     struct inode * e;
     int res;
-    char * block = (char*)buf;
-    const off_t end = size + offset;
-    off_t curblock;
-    size_t tocopy, reallen;
+    size_t reallen;
     int32_t realend = size, blk_offset = 0;
     char * zlock;
     bson doc, cond;
@@ -254,7 +214,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
             zlock -= 16;
         }
     }
-    if(e->data[0] == '\0') {
+    if(buf[0] == '\0') {
         zlock = (char*)buf;
         while(zlock - buf < realend) {
             __m128i x = _mm_loadu_si128((__m128i*)zlock);
@@ -270,8 +230,12 @@ int mongo_write(const char *path, const char *buf, size_t size,
         }
     }
     reallen = realend - blk_offset;
-    if(reallen == 0)
-        return 0;
+    if(reallen == 0) {
+        pthread_mutex_lock(&e->wr_extent_lock);
+        res = insert_empty(&e->wr_extent_root, offset, size);
+        pthread_mutex_unlock(&e->wr_extent_lock);
+        return res;
+    }
 
 #ifdef __APPLE__
     CC_SHA1(buf, size, hash);
@@ -309,10 +273,11 @@ int mongo_write(const char *path, const char *buf, size_t size,
     }
 
     pthread_mutex_lock(&e->wr_extent_lock);
-    res = insert_hash(&e->wr_extent_root,
-        offset + blk_offset, reallen, hash);
-    if(res == 0 && now - e->wr_extent_updated > 3)
+    res = insert_hash(&e->wr_extent_root, offset, size, hash);
+    if(now - e->wr_extent_updated > 3) {
         res = serialize_extent(e, e->wr_extent_root);
+        e->wr_extent_updated = now;
+    }
     pthread_mutex_unlock(&e->wr_extent_lock);
     if(res != 0)
         return res;
@@ -323,8 +288,7 @@ int do_trunc(struct inode * e, off_t off) {
     bson cond;
     int res;
     mongo * conn = get_conn();
-    struct enode * trunc_root = NULL;
-    off_t new_size = off;
+
     if(e->mode & S_IFDIR)
         return -EISDIR;
 
@@ -342,11 +306,11 @@ int do_trunc(struct inode * e, off_t off) {
     }
 
     bson_init(&cond);
-    bson_append(&cond, "inode", &e->oid);
+    bson_append_oid(&cond, "inode", &e->oid);
     bson_finish(&cond);
 
-    res = mongo_remove(cond, extents_name, &cond, NULL);
-    bson_destroy(&cond)
+    res = mongo_remove(conn, extents_name, &cond, NULL);
+    bson_destroy(&cond);
     if(res != 0) {
         pthread_rwlock_unlock(&e->rd_extent_lock);
         fprintf(stderr, "Error removing extents in do_truncate\n");
@@ -359,7 +323,7 @@ int do_trunc(struct inode * e, off_t off) {
         return -EIO;
     }
     pthread_mutex_lock(&e->wr_extent_lock);
-    free_extent_tree(&e->wr_extent_root);
+    free_extent_tree(e->wr_extent_root);
     e->wr_extent_root = NULL;
     pthread_mutex_unlock(&e->wr_extent_lock);
     pthread_rwlock_unlock(&e->rd_extent_lock);

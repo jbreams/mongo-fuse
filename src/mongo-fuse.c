@@ -24,6 +24,7 @@ char * blocks_name = "test.blocks";
 char * inodes_name = "test.inodes";
 char * locks_name = "test.locks";
 char * maps_name = "test.maps";
+char * extents_name = "test.extents";
 char * inodes_coll = "inodes";
 char * dbname = "test";
 const char * mongo_host = "127.0.0.1";
@@ -67,8 +68,7 @@ static int mongo_getattr(const char *path, struct stat *stbuf) {
 static int mongo_open(const char *path, struct fuse_file_info *fi)
 {
     struct inode * e = malloc(sizeof(struct inode));
-    int res, pathlen = strlen(path);
-    char * plock = (char*)path + pathlen;
+    int res;
 
     res = get_inode(path, e);
     if(res != 0) {
@@ -77,9 +77,6 @@ static int mongo_open(const char *path, struct fuse_file_info *fi)
         return res;
     }
     fi->fh = (uintptr_t)e;
-    while(plock != path && *plock != '/')
-        plock--;
-    e->is_blocksizefile = strcmp(plock, "/.blocksize") == 0;
     e->updated = time(NULL);
 
     return 0;
@@ -315,12 +312,14 @@ static int mongo_flock(const char * path, struct fuse_file_info * fi, int op) {
 static int mongo_flush(const char * path, struct fuse_file_info * fi) {
     struct inode * e = (struct inode*)fi->fh;
     int res;
-    if(e->maps) {
-        for(int i = 0; i < e->nmaps; i++) {
-            if((res = commit_blockmap(e, e->maps[i])) != 0)
-                return res;
-        }
+    pthread_mutex_lock(&e->wr_extent_lock);
+    if(!e->wr_extent_root) {
+        pthread_mutex_unlock(&e->wr_extent_lock);
+        return 0;
     }
+    res = serialize_extent(e, e->wr_extent_root);
+    e->wr_extent_updated = time(NULL);
+    pthread_mutex_unlock(&e->wr_extent_lock);
     return 0;
 }
 
@@ -375,6 +374,5 @@ int main(int argc, char *argv[])
 {
     setup_threading();
     int rc = fuse_main(argc, argv, &mongo_oper, NULL);
-    teardown_threading();
     return rc;
 }

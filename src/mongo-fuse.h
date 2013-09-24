@@ -1,6 +1,5 @@
 #include <pthread.h>
 #include <stdint.h>
-#define MONGO_HAVE_STDINT
 #include <mongo.h>
 #include <sys/types.h>
 #define FUSE_USE_VERSION 26
@@ -12,6 +11,7 @@ struct extent {
     char data[1];
 };
 
+#define BLOCKS_PER_EXTENT 512
 #define TREE_HEIGHT_LIMIT 64
 #define LEFT 0
 #define RIGHT 1
@@ -27,7 +27,8 @@ struct enode {
     struct enode *links[2], *n;
     off_t off;
     size_t len;
-    char hash[20];
+    int empty;
+    uint8_t hash[20];
 };
 
 struct enode_iter {
@@ -59,20 +60,22 @@ struct inode {
 
     pthread_rwlock_t rd_extent_lock;
     struct enode * rd_extent_root;
+    time_t rd_extent_updated;
 };
 
 mongo * get_conn();
 void setup_threading();
 void teardown_threading();
 char * get_compress_buf();
-struct extent * new_extent(size_t datasize);
+char * get_extent_buf();
 
 void remove_range(off_t off, size_t len, struct enode ** root);
 struct enode * iter_next(struct enode_iter * trav);
 struct enode * start_iter(struct enode_iter * trav,
     struct enode * root, off_t off);
 void free_extent_tree(struct enode * root);
-int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]);
+int insert_hash(struct enode ** r, off_t off, size_t len, uint8_t hash[20]);
+int insert_empty(struct enode **r, off_t off, size_t len);
 
 int serialize_extent(struct inode * e, struct enode * root);
 int deserialize_extent(struct inode * e, off_t off, size_t len);

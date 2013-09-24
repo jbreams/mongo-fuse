@@ -17,8 +17,7 @@ struct thread_data {
     // largest block size plus any overhead from snappy.
     // See https://code.google.com/p/snappy/source/browse/trunk/snappy.cc#55
     char compress_buf[76491];
-    size_t cursize;
-    struct extent * extent_buf;
+    char extent_buf[65536];
 };
 
 void free_thread_data(void* rp) {
@@ -53,19 +52,8 @@ static struct thread_data * get_thread_data() {
     return td;
 }
 
-struct extent * new_extent(size_t datasize) {
-    struct thread_data * td = get_thread_data();
-    if(datasize > td->cursize) {
-        if(td->extent_buf) {
-            td->extent_buf = NULL;
-            free(td->extent_buf);
-        }
-        td->extent_buf = malloc(sizeof(struct extent) + datasize);
-        if(!td->extent_buf)
-            return NULL;
-        td->cursize = datasize;
-    }
-    return td->extent_buf;
+char * get_extent_buf() {
+    return get_thread_data()->extent_buf;
 }
 
 char * get_compress_buf() {

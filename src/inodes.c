@@ -120,8 +120,6 @@ int read_inode(const bson * doc, struct inode * out) {
             out->modified = bson_iterator_time_t(&i);
         else if(strcmp(key, "dev") == 0)
             out->dev = bson_iterator_long(&i);
-        else if(strcmp(key, "blocksize") == 0)
-            out->blocksize = bson_iterator_int(&i);
         else if(strcmp(key, "data") == 0) {
             out->datalen = bson_iterator_string_len(&i);
             out->data = malloc(out->datalen + 1);
@@ -141,28 +139,6 @@ int read_inode(const bson * doc, struct inode * out) {
                 out->direntcount++;
             }
         }
-        else if(strcmp(key, "reads") == 0 || strcmp(key, "writes") == 0) {
-            int write = (*key == 'w');
-            bson_iterator_subiterator(&i, &sub);
-            while((bt = bson_iterator_next(&sub)) != 0) {
-                uint64_t curval = bson_iterator_long(&sub);
-                int index;
-                key = bson_iterator_key(&sub);
-                index = atoi(key);
-                if(write)
-                    out->writes[index] = curval;
-                else
-                    out->reads[index] = curval;
-            }
-        }
-    }
-
-    if(out->size > 0) {
-        out->nmaps = (out->size / (out->blocksize * BLOCKS_PER_MAP)) + 1;
-        out->maps = malloc(sizeof(struct block_map*) * out->nmaps);
-        if(!out->maps)
-            return -ENOMEM;
-        memset(out->maps, 0, sizeof(struct block_map*) * out->nmaps);
     }
 
     return 0;
@@ -219,59 +195,11 @@ int check_access(struct inode * e, int amode) {
     return (((mode & S_IRWXO) & amode) == 0);
 }
 
-int crunch_stats(struct inode * p) {
-    int i, ireadmax, iwritemax;
-    uint64_t readmax = 0, writemax = 0;
-
-    for(i = 0; i < 8; i++) {
-        if(p->reads[i] > readmax) {
-            readmax = p->reads[i];
-            ireadmax = i;
-        }
-    }
-    for(i = 0; i < 8; i++) {
-        if(p->writes[i] > writemax) {
-            writemax = p->writes[i];
-            iwritemax = i;
-        }
-    }
-
-    if(writemax == 0 && readmax == 0)
-        return 0;
-
-    if(writemax > readmax)
-        return (1<<(iwritemax + 12));
-    else
-        return (1<<(ireadmax + 12));
-}
-
-int choose_block_size(const char * path, size_t len) {
-    int blocksize = 0, res;
-    char parentpath[PATH_MAX], *ppl = (char*)parentpath + len;
-    struct inode parent;
-
-    strcpy(parentpath, path);
-    while((ppl - parentpath) > 1 && *ppl != '/') ppl--;
-    *ppl = '\0';
-
-    res = get_inode(parentpath, &parent);
-    if(res != 0 || !(parent.mode & S_IFDIR)) {
-        free_inode(&parent);
-        return -ENOENT;
-    }
-
-    blocksize = parent.blocksize;
-    free_inode(&parent);
-    if(blocksize == 0)
-        blocksize = 4096;
-    return blocksize;
-}
-
 int create_inode(const char * path, mode_t mode, const char * data) {
     struct inode e;
     int pathlen = strlen(path);
     const struct fuse_context * fcx = fuse_get_context();
-    int res, blocksize;
+    int res;
 
     res = inode_exists(path);
     if(res == 0) {
@@ -279,15 +207,6 @@ int create_inode(const char * path, mode_t mode, const char * data) {
         return -EEXIST;
     } else if(res == -EIO)
         return -EIO;
-
-    if(mode & S_IFREG) {
-        blocksize = choose_block_size(path, pathlen);
-        if(blocksize < 0)
-            return blocksize;
-        e.blocksize = blocksize;
-    }
-    else
-        e.blocksize = 0;
 
     bson_oid_gen(&e.oid);
     e.dirents = malloc(sizeof(struct dirent) + pathlen);
@@ -310,8 +229,10 @@ int create_inode(const char * path, mode_t mode, const char * data) {
         e.datalen = 0;
         e.size = 0;
     }
-    e.maps = NULL;
-    e.nmaps = 0;
+    e.rd_extent_root = NULL;
+    e.wr_extent_root = NULL;
+    e.wr_extent_updated = 0;
+    e.rd_extent_updated = 0;
 
     res = commit_inode(&e);
     free_inode(&e);
@@ -326,11 +247,8 @@ void free_inode(struct inode *e) {
         free(e->dirents);
         e->dirents = next;
     }
-    if(e->maps) {
-        for(int i = 0; i < e->nmaps; i++) {
-            if(e->maps[i])
-                free(e->maps[i]);
-        }
-        free(e->maps);
-    }
+    if(e->rd_extent_root)
+        free_extent_tree(e->rd_extent_root);
+    if(e->wr_extent_root)
+        free_extent_tree(e->wr_extent_root);
 }

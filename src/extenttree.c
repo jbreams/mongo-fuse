@@ -7,7 +7,6 @@
 
 #define BLACK 0
 #define RED 1
-#define NC(n) (n == NULL ? BLACK : n->c)
 #define IS_RED(n) (n && n->c == RED)
 
 struct enode * rotate_single(struct enode * root, int dir) {
@@ -167,16 +166,10 @@ void remove_range(off_t off, size_t len, struct enode ** root) {
 	}
 }
 
-int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]) {
+void insert_enode(struct enode **r, struct enode * n) {
 	if(*r == NULL) {
-		struct enode * nr = malloc(sizeof(struct enode));
-		memset(nr, 0, sizeof(struct enode));
-		nr->off = off;
-		nr->len = len;
-		nr->c = BLACK;
-		memcpy(nr->hash, hash, 20);
-		*r = nr;
-		return 0;
+		*r = n;
+		return;
 	}
 
 	struct enode head = {0};
@@ -188,14 +181,8 @@ int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]) {
 	q = t->links[RIGHT] = *r;
 
 	for(;;) {
-		if(q == NULL) {
-			p->links[dir] = q = malloc(sizeof(struct enode));
-			if(!q)
-				return -ENOMEM;
-			q->off = off;
-			q->len = len;
-			memcpy(q->hash, hash, 20);
-		}
+		if(q == NULL)
+			p->links[dir] = q = n;
 		else if(IS_RED(q->links[LEFT]) && IS_RED(q->links[RIGHT])) {
 			q->c = RED;
 			q->links[LEFT]->c = BLACK;
@@ -210,11 +197,11 @@ int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]) {
 				t->links[dir2] = rotate_double(g, !last);
 		}
 
-		if(q->off == off)
+		if(q->off == n->off)
 			break;
 
 		last = dir;
-		dir = q->off < off;
+		dir = q->off < n->off;
 
 		if(g != NULL)
 			t = g;
@@ -225,6 +212,33 @@ int insert_hash(struct enode ** r, off_t off, size_t len, char hash[20]) {
 
 	*r = head.links[RIGHT];
 	(*r)->c = BLACK;
+}
+
+int insert_hash(struct enode ** r, off_t off, size_t len, uint8_t hash[20]) {
+	struct enode * nr = malloc(sizeof(struct enode));
+	if(!nr)
+		return -ENOMEM;
+
+	memset(nr, 0, sizeof(struct enode));
+	nr->off = off;
+	nr->len = len;
+	memcpy(nr->hash, hash, 20);
+
+	insert_enode(r, nr);
+	return 0;
+}
+
+int insert_empty(struct enode **r, off_t off, size_t len) {
+	struct enode * nr = malloc(sizeof(struct enode));
+	if(!nr)
+		return -ENOMEM;
+
+	memset(nr, 0, sizeof(struct enode));
+	nr->off = off;
+	nr->len = len;
+	nr->empty = 1;
+
+	insert_enode(r, nr);
 	return 0;
 }
 

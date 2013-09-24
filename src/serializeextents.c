@@ -7,59 +7,44 @@
 #include <mongo.h>
 #include "mongo-fuse.h"
 
-#define BLACK 0
-#define RED 1
-#define NC(n) (n == NULL ? BLACK : n->c)
-
 extern char * extents_name;
-
-static void init_new_extent_doc(struct inode * e, struct enode * c, bson * doc) {
-	bson_init(doc);
-	bson_append_new_oid(doc, "_id");
-	bson_append_oid(doc, "inode", &e->oid);
-	bson_append_long(doc, "start", c->off);
-	bson_append_start_array(doc, "blocks");
-}
-
-static void serialize_node(bson * doc, struct enode * n, int idx) {
-	char idxstr[10];
-	bson_numstr(idxstr, idx);
-	bson_append_start_object(doc, idxstr);
-	bson_append_binary(doc, "hash", 0, n->hash, 20);
-	bson_append_int(doc, "len", n->len);
-	bson_append_finish_object(doc);
-}
 
 int serialize_extent(struct inode * e, struct enode * root) {
 	mongo * conn = get_conn();
 	bson doc, cond;
-	int nhashes = 0, res;
-	off_t last_end = 0, cur_start = 0;
-	struct enode * cur, *prev = NULL;
+	int res;
+	struct enode_iter iter;
+	struct enode * cur = start_iter(&iter, root, 0);
 
-	cur = root;
-	prev = cur;
 	while(cur) {
-		init_new_extent_doc(e, cur, &doc);
-		cur_start = cur->off;
-		while(cur && cur->off != last_end && nhashes < BLOCKS_PER_EXTENT) {
-			struct enode * next;
-			if(prev == cur->p) {
-				next = cur->l;
-				if(!next) {
-					serialize_node(&doc, cur, nhashes++);
-					next = cur->r ? cur->r : cur->p;
-				}
-			}
-			else if(prev == cur->l) {
-				serialize_node(&doc, cur, nhashes++);
-				next = cur->r ? cur->r : cur->p;
-			}
-			else if(prev == cur->r)
-				next = cur->p;
-			prev = cur;
+		bson_oid_t docid;
+		off_t last_end = 0;
+		const off_t cur_start = cur->off;
+		int nhashes = 0;
+
+		bson_oid_gen(&docid);
+		bson_init(&doc);
+		bson_append_oid(&doc, "_id", &docid);
+		bson_append_oid(&doc, "inode", &e->oid);
+		bson_append_long(&doc, "start", cur->off);
+		bson_append_start_array(&doc, "blocks");
+
+		while(cur && nhashes < BLOCKS_PER_EXTENT) {
+			char idxstr[10];
+			bson_numstr(idxstr, nhashes++);
+			bson_append_start_object(&doc, idxstr);
+			if(cur->empty)
+				bson_append_null(&doc, "hash");
+			else
+				bson_append_binary(&doc, "hash", 0,
+					(const char*)cur->hash, 20);
+			bson_append_int(&doc, "len", cur->len);
+			bson_append_finish_object(&doc);
+
 			last_end = cur->off + cur->len;
-			cur = next;
+			cur = iter_next(&iter);
+			if(cur && cur->off != last_end)
+				break;
 		}
 		bson_append_finish_array(&doc);
 		bson_append_long(&doc, "end", last_end);
@@ -80,6 +65,9 @@ int serialize_extent(struct inode * e, struct enode * root) {
 		bson_append_start_object(&cond, "end");
 		bson_append_long(&cond, "$lte", last_end);
 		bson_append_finish_object(&cond);
+		bson_append_start_object(&cond, "_id");
+		bson_append_oid(&cond, "$ne", &docid);
+		bson_append_finish_object(&cond);
 		bson_finish(&cond);
 
 		res = mongo_remove(conn, extents_name, &cond, NULL);
@@ -88,8 +76,6 @@ int serialize_extent(struct inode * e, struct enode * root) {
 			fprintf(stderr, "Error cleaning up extents\n");
 			return -EIO;
 		}
-
-		nhashes = 0;
 	}
 	return 0;
 }
@@ -126,7 +112,7 @@ int deserialize_extent(struct inode * e, off_t off, size_t len) {
 		bson_type bt;
 		off_t curoff = 0;
 		const char * key;
-		bson_iteartor_init(&topi, curdoc);
+		bson_iterator_init(&topi, curdoc);
 		while(bson_iterator_next(&topi) != 0) {
 			key = bson_iterator_key(&topi);
 			if(strcmp(key, "blocks") == 0)
@@ -137,17 +123,25 @@ int deserialize_extent(struct inode * e, off_t off, size_t len) {
 
 		while(bson_iterator_next(&i) != 0) {
 			bson_iterator_subiterator(&i, &sub);
-			char * hash = NULL;
+			uint8_t * hash = NULL;
 			int len = 0;
-			while(bson_iterator_next(&sub) != 0) {
+			int empty = 0;
+			while((bt = bson_iterator_next(&sub)) != 0) {
 				key = bson_iterator_key(&sub);
-				if(strcmp(key, "hash") == 0)
-					hash = (char*)bson_iterator_bin_data(&sub);
+				if(strcmp(key, "hash") == 0) {
+					if(bt == BSON_NULL)
+						empty = 1;
+					else
+						hash = (uint8_t*)bson_iterator_bin_data(&sub);
+				}
 				else if(strcmp(key, "len") == 0)
 					len = bson_iterator_int(&sub);
 			}
-			if((res = insert_hash(&e->rd_extent_root,
-				curoff, len, hash)) != 0) {
+			if(empty)
+				res = insert_empty(&e->rd_extent_root, curoff, len);
+			else
+				res = insert_hash(&e->rd_extent_root, curoff, len, hash);
+			if(res != 0) {
 				fprintf(stderr, "Error adding hash to extent tree\n");
 				pthread_rwlock_unlock(&e->rd_extent_lock);
 				return res;
@@ -157,7 +151,6 @@ int deserialize_extent(struct inode * e, off_t off, size_t len) {
 	}
 	mongo_cursor_destroy(&curs);
 	bson_destroy(&cond);
-	//e->rd_extent_updated = now;
 	pthread_rwlock_unlock(&e->rd_extent_lock);
 	return 0;
 }

@@ -250,33 +250,26 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
     const char * path = e->dirents->path;
     size_t pathlen = e->dirents->len;
     char * filename = (char*)path + pathlen;
-    uint64_t off = 0;
     char * generation = (char*)p;
 
     if(e->mode & S_IFDIR)
         return 0;
 
     while(*(filename-1) != '/') filename--;
-    if(strcmp(filename, ".blocksize") == 0)
-        return 0;
 
-    bson_oid_gen(&newid);
-    while(off < e->size) {
-        if((res = get_blockmap(e, off)) < 0)
-            return res;
-        struct block_map * map = e->maps[res];
-        memcpy(&map->inode, &newid, sizeof(bson_oid_t));
-        map->updated = 0;
-        for(int i = 0; i < BLOCKS_PER_MAP; i++) {
-            if(memcmp(map->blocks[i], empty_hash, 20) != 0)
-                map->changed[WORD_OFFSET(off)] |= (1 << BIT_OFFSET(off));
-            off += e->blocksize;
-        }
-        if((res = commit_blockmap(e, e->maps[res])) != 0)
-            return res;
+    pthread_rwlock_wrlock(&e->rd_extent_lock);
+    free_extent_tree(e->rd_extent_root);
+    e->rd_extent_root = NULL;
+    e->rd_extent_updated = 0;
+    res = deserialize_extent(e, 0, e->size);
+    if(res != 0) {
+        pthread_rwlock_unlock(&e->rd_extent_lock);
+        return res;
     }
-
+    bson_oid_gen(&newid);
     memcpy(&e->oid, &newid, sizeof(bson_oid_t));
+    res = serialize_extent(e, e->rd_extent_root);
+    pthread_rwlock_unlock(&e->rd_extent_lock);
 
     struct dirent * d = malloc(sizeof(struct dirent) + pathlen + 21);
     d->len = sprintf(d->path, "%s/.snapshot/%s/%s", parent, generation, filename);
