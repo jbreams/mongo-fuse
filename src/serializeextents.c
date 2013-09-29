@@ -27,6 +27,7 @@ int serialize_extent(struct inode * e, struct enode * root) {
 		bson_append_oid(&doc, "_id", &docid);
 		bson_append_oid(&doc, "inode", &e->oid);
 		bson_append_long(&doc, "start", cur->off);
+		fprintf(stderr, "Starting extent at %llu\n", cur->off);
 		bson_append_start_array(&doc, "blocks");
 
 		while(cur && nhashes < BLOCKS_PER_EXTENT) {
@@ -50,13 +51,16 @@ int serialize_extent(struct inode * e, struct enode * root) {
 		bson_append_long(&doc, "end", last_end);
 		bson_finish(&doc);
 
+		fprintf(stderr, "Ending extent at %llu\n", last_end);
 		res = mongo_insert(conn, extents_name, &doc, NULL);
 		bson_destroy(&doc);
 		if(res != MONGO_OK) {
 			fprintf(stderr, "Error inserting extent\n");
+			iter_finish(&iter);
 			return -EIO;
 		}
 
+/*
 		bson_init(&cond);
 		bson_append_oid(&cond, "inode", &e->oid);
 		bson_append_start_object(&cond, "start");
@@ -69,14 +73,18 @@ int serialize_extent(struct inode * e, struct enode * root) {
 		bson_append_oid(&cond, "$ne", &docid);
 		bson_append_finish_object(&cond);
 		bson_finish(&cond);
+		fprintf(stderr, "Removing old extents:\n");
+		bson_print(&cond);
 
 		res = mongo_remove(conn, extents_name, &cond, NULL);
 		bson_destroy(&cond);
 		if(res != MONGO_OK) {
 			fprintf(stderr, "Error cleaning up extents\n");
+			iter_finish(&iter);
 			return -EIO;
-		}
+		}*/
 	}
+	iter_finish(&iter);
 	return 0;
 }
 

@@ -10,6 +10,7 @@
 #include <sys/file.h>
 #include <limits.h>
 #include <time.h>
+#include <pthread.h>
 #include "mongo-fuse.h"
 #include <osxfuse/fuse.h>
 
@@ -95,12 +96,18 @@ int commit_inode(struct inode * e) {
     return 0;
 }
 
+void init_inode(struct inode * e) {
+    memset(e, 0, sizeof(struct inode));
+    pthread_rwlock_init(&e->rd_extent_lock, NULL);
+    pthread_mutex_init(&e->wr_extent_lock, NULL);
+}
+
 int read_inode(const bson * doc, struct inode * out) {
     bson_iterator i, sub;
     bson_type bt;
     const char * key;
 
-    memset(out, 0, sizeof(struct inode));
+    init_inode(out);
     bson_iterator_init(&i, doc);
     while((bt = bson_iterator_next(&i)) > 0) {
         key = bson_iterator_key(&i);
@@ -208,6 +215,7 @@ int create_inode(const char * path, mode_t mode, const char * data) {
     } else if(res == -EIO)
         return -EIO;
 
+    init_inode(&e);
     bson_oid_gen(&e.oid);
     e.dirents = malloc(sizeof(struct dirent) + pathlen);
     e.dirents->len = pathlen;

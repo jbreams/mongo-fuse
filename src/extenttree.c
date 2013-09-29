@@ -91,14 +91,42 @@ int remove_one_node(struct enode ** root, off_t off) {
 	return f == NULL;
 }
 
+int grow_stack(struct enode_iter * trav) {
+	if(trav->top < TREE_HEIGHT_LIMIT || trav->top < trav->pathsize)
+		return 0;
+
+	int copy = 0;
+	struct enode *new_stack;
+	if(trav->pathsize == 0)  {
+		trav->pathsize = 512;
+		copy = 1;
+		trav->path = NULL;
+	}
+	else
+		trav->pathsize += 512;
+
+	new_stack = realloc(trav->path, trav->pathsize * sizeof(struct enode*));
+	if(!new_stack)
+		return -ENOMEM;
+	if(copy)
+		memcpy(new_stack, trav->path_stack,
+			sizeof(struct enode*) * TREE_HEIGHT_LIMIT);
+	trav->path = (struct enode**)new_stack;
+	return 0;
+}
+
 struct enode * start_iter(struct enode_iter * trav,
 	struct enode * root, off_t off) {
 	trav->root = trav->cur = root;
 	trav->top = 0;
+	trav->path = trav->path_stack;
+
 	if(!root)
 		return NULL;
 	while(trav->cur->links[LEFT] != NULL && trav->cur->off > off) {
 		trav->path[trav->top++] = trav->cur;
+		if(grow_stack(trav) != 0)
+			return NULL;
 		trav->cur = trav->cur->links[LEFT];
 	}
 	return trav->cur;
@@ -107,10 +135,14 @@ struct enode * start_iter(struct enode_iter * trav,
 struct enode * iter_next(struct enode_iter * trav) {
 	if(trav->cur->links[RIGHT] != NULL) {
 		trav->path[trav->top++] = trav->cur;
+		if(grow_stack(trav) != 0)
+			return NULL;
 		trav->cur = trav->cur->links[RIGHT];
 
 		while(trav->cur->links[LEFT] != NULL) {
 			trav->path[trav->top++] = trav->cur;
+			if(grow_stack(trav) != 0)
+				return NULL;
 			trav->cur = trav->cur->links[LEFT];
 		}
 	}
@@ -128,6 +160,11 @@ struct enode * iter_next(struct enode_iter * trav) {
 	}
 
 	return trav->cur;
+}
+
+void iter_finish(struct enode_iter * trav) {
+	if(trav->path != trav->path_stack)
+		free(trav->path);
 }
 
 void remove_range(off_t off, size_t len, struct enode ** root) {
@@ -150,8 +187,10 @@ void remove_range(off_t off, size_t len, struct enode ** root) {
 	while(n->off < off)
 		n = iter_next(&it);
 
-	if(n->off + n->len > end)
+	if(n->off + n->len > end) {
+		iter_finish(&it);
 		return;
+	}
 
 	while(n && n->off + n->len < end) {
 		n->n = h;
@@ -164,6 +203,7 @@ void remove_range(off_t off, size_t len, struct enode ** root) {
 		remove_one_node(root, h->off);
 		h = n;
 	}
+	iter_finish(&it);
 }
 
 void insert_enode(struct enode **r, struct enode * n) {

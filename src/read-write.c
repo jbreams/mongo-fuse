@@ -163,6 +163,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         offset += tocopy;
     }
     pthread_rwlock_unlock(&e->rd_extent_lock);
+    iter_finish(&iter);
 
     return block - buf;
 }

@@ -35,7 +35,9 @@ struct enode_iter {
     struct enode * root;
     struct enode * cur;
     size_t top;
-    struct enode * path[TREE_HEIGHT_LIMIT];
+    struct enode * path_stack[TREE_HEIGHT_LIMIT];
+    struct enode ** path;
+    size_t pathsize;
 };
 
 struct inode {
@@ -73,6 +75,7 @@ void remove_range(off_t off, size_t len, struct enode ** root);
 struct enode * iter_next(struct enode_iter * trav);
 struct enode * start_iter(struct enode_iter * trav,
     struct enode * root, off_t off);
+void iter_finish(struct enode_iter * trav);
 void free_extent_tree(struct enode * root);
 int insert_hash(struct enode ** r, off_t off, size_t len, uint8_t hash[20]);
 int insert_empty(struct enode **r, off_t off, size_t len);
