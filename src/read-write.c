@@ -91,6 +91,17 @@ static int resolve_block(struct inode * e, uint8_t hash[20], char * buf) {
     return 0;
 }
 
+size_t read_block(struct enode * cur, char * buf, off_t off, size_t size) {
+    size_t tocopy = cur->len > size ? size: cur->len;
+    size_t skip = 0;
+    if(cur->off + cur->len < off)
+        return 0;
+    if(cur->off < off) {
+        skip = off - cur->off;
+        tocopy -= skip;
+    }
+}
+
 int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                struct fuse_file_info *fi) {
     struct inode * e;
@@ -98,7 +109,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     char * block = buf;
     const off_t end = size + offset;
     off_t last_end = 0;
-    size_t tocopy;
+    size_t tocopy, skip, read_left = 0;
     struct enode * cur;
     struct enode_iter iter;
     char * extent_buf = get_extent_buf();
@@ -119,8 +130,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     pthread_rwlock_rdlock(&e->rd_extent_lock);
     cur = start_iter(&iter, e->rd_extent_root, offset);
 
-    while(block - buf != size) {
-        size_t copy_offset = 0;
+    while(read_left > 0) {
         if(!cur || cur->off > end)
             break;
 
@@ -133,11 +143,15 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
             tocopy = cur->off - last_end;
             memset(block, 0, tocopy);
             block += tocopy;
+            offset += tocopy;
         }
 
-        copy_offset = offset - cur->off;
-        tocopy = (cur->len - copy_offset) < size ?
-            (cur->len - copy_offset) : size;
+        tocopy = cur->len > read_left ? read_left : cur->len;
+        if(cur->off < offset) {
+            skip = offset - cur->off;
+            tocopy -= skip;
+        }
+
         if(cur->empty) {
             memset(block, 0, tocopy);
             block += tocopy;
@@ -148,7 +162,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                 pthread_rwlock_unlock(&e->rd_extent_lock);
                 return res;
             }
-            memcpy(block, extent_buf + copy_offset, tocopy);
+            memcpy(block, extent_buf + skip, tocopy);
             block += tocopy;
             offset += tocopy;
         }
