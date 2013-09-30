@@ -91,17 +91,6 @@ static int resolve_block(struct inode * e, uint8_t hash[20], char * buf) {
     return 0;
 }
 
-size_t read_block(struct enode * cur, char * buf, off_t off, size_t size) {
-    size_t tocopy = cur->len > size ? size: cur->len;
-    size_t skip = 0;
-    if(cur->off + cur->len < off)
-        return 0;
-    if(cur->off < off) {
-        skip = off - cur->off;
-        tocopy -= skip;
-    }
-}
-
 int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                struct fuse_file_info *fi) {
     struct inode * e;
@@ -109,7 +98,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     char * block = buf;
     const off_t end = size + offset;
     off_t last_end = 0;
-    size_t tocopy, skip, read_left = 0;
+    size_t tocopy, skip, read_left = size;
     struct enode * cur;
     struct enode_iter iter;
     char * extent_buf = get_extent_buf();
@@ -144,18 +133,22 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
             memset(block, 0, tocopy);
             block += tocopy;
             offset += tocopy;
+            read_left -= tocopy;
         }
 
         tocopy = cur->len > read_left ? read_left : cur->len;
-        if(cur->off < offset) {
+        if(cur->off < offset)
             skip = offset - cur->off;
-            tocopy -= skip;
-        }
+        else
+            skip = 0;
+        if(skip + tocopy > cur->len)
+            tocopy = (cur->len - skip);
 
         if(cur->empty) {
             memset(block, 0, tocopy);
             block += tocopy;
             offset += tocopy;
+            read_left -= tocopy;
         } else {
             res = resolve_block(e, cur->hash, extent_buf);
             if(res != 0) {
@@ -163,6 +156,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
                 return res;
             }
             memcpy(block, extent_buf + skip, tocopy);
+            read_left -= tocopy;
             block += tocopy;
             offset += tocopy;
         }

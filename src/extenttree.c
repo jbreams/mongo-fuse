@@ -207,6 +207,8 @@ void remove_range(off_t off, size_t len, struct enode ** root) {
 }
 
 void insert_enode(struct enode **r, struct enode * n) {
+	free(n);
+	return;
 	if(*r == NULL) {
 		*r = n;
 		return;

@@ -60,7 +60,6 @@ int serialize_extent(struct inode * e, struct enode * root) {
 			return -EIO;
 		}
 
-/*
 		bson_init(&cond);
 		bson_append_oid(&cond, "inode", &e->oid);
 		bson_append_start_object(&cond, "start");
@@ -82,7 +81,7 @@ int serialize_extent(struct inode * e, struct enode * root) {
 			fprintf(stderr, "Error cleaning up extents\n");
 			iter_finish(&iter);
 			return -EIO;
-		}*/
+		}
 	}
 	iter_finish(&iter);
 	return 0;
