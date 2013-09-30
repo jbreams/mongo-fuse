@@ -12,6 +12,7 @@ struct extent {
 };
 
 #define BLOCKS_PER_EXTENT 512
+#define MAX_BLOCK_SIZE 65536
 #define TREE_HEIGHT_LIMIT 64
 #define LEFT 0
 #define RIGHT 1

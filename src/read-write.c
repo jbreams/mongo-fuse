@@ -75,7 +75,7 @@ static int resolve_block(struct inode * e, uint8_t hash[20], char * buf) {
         return -EIO;
     }
 
-    outsize = e->blocksize - offset;
+    outsize = MAX_BLOCK_SIZE;
     if((res = snappy_uncompress(compdata, compsize,
         buf + offset, &outsize)) != SNAPPY_OK) {
         fprintf(stderr, "Error uncompressing block %d\n", res);
@@ -136,7 +136,8 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         }
 
         copy_offset = offset - cur->off;
-        tocopy = cur->len - copy_offset;
+        tocopy = (cur->len - copy_offset) < size ?
+            (cur->len - copy_offset) : size;
         if(cur->empty) {
             memset(block, 0, tocopy);
             block += tocopy;
@@ -175,6 +176,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
     int res;
     size_t reallen;
     int32_t realend = size, blk_offset = 0;
+    const off_t write_end = size + offset;
     char * zlock;
     bson doc, cond;
     mongo * conn = get_conn();
@@ -258,7 +260,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
         return -EIO;
     }
     bson_append_binary(&doc, "data", 0, comp_out, comp_size);
-    bson_append_int(&doc, "offset", offset);
+    bson_append_int(&doc, "offset", blk_offset);
     bson_append_int(&doc, "size", size);
     bson_append_finish_object(&doc);
     bson_finish(&doc);
@@ -282,6 +284,12 @@ int mongo_write(const char *path, const char *buf, size_t size,
     pthread_mutex_unlock(&e->wr_extent_lock);
     if(res != 0)
         return res;
+
+    if(write_end > e->size) {
+        e->size = write_end;
+        if((res = commit_inode(e)) != 0)
+            return 0;
+    }
     return size;
 }
 

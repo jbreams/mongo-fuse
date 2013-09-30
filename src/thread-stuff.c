@@ -16,8 +16,8 @@ struct thread_data {
     // This is a buffer for compression output that should hold the
     // largest block size plus any overhead from snappy.
     // See https://code.google.com/p/snappy/source/browse/trunk/snappy.cc#55
-    char compress_buf[76491];
-    char extent_buf[65536];
+    char compress_buf[32 + MAX_BLOCK_SIZE + MAX_BLOCK_SIZE / 6];
+    char extent_buf[MAX_BLOCK_SIZE];
 };
 
 void free_thread_data(void* rp) {
