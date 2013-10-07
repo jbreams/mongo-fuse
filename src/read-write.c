@@ -188,7 +188,6 @@ int mongo_write(const char *path, const char *buf, size_t size,
     char * zlock;
     bson doc, cond;
     mongo * conn = get_conn();
-    mongo_cursor curs;
     uint8_t hash[20];
     time_t now = time(NULL);
 
@@ -259,38 +258,24 @@ int mongo_write(const char *path, const char *buf, size_t size,
     bson_append_binary(&cond, "_id", 0, (char*)hash, sizeof(hash));
     bson_finish(&cond);
 
-    mongo_cursor_init(&curs, conn, blocks_name);
-    mongo_cursor_set_query(&curs, &cond);
-    mongo_cursor_set_limit(&curs, 1);
-
-    res = mongo_cursor_next(&curs);
-    mongo_cursor_destroy(&curs);
-    if(res != MONGO_OK) {
-        if(curs.err != MONGO_CURSOR_EXHAUSTED) {
-            bson_destroy(&cond);
-            return -EIO;
-        }
-
-        bson_init(&doc);
-        bson_append_start_object(&doc, "$setOnInsert");
-        char * comp_out = get_compress_buf();
-        size_t comp_size = snappy_max_compressed_length(reallen);
-        if((res = snappy_compress(buf + blk_offset, reallen,
-            comp_out, &comp_size)) != SNAPPY_OK) {
-            fprintf(stderr, "Error compressing input: %d\n", res);
-            return -EIO;
-        }
-        bson_append_binary(&doc, "data", 0, comp_out, comp_size);
-        bson_append_int(&doc, "offset", blk_offset);
-        bson_append_int(&doc, "size", size);
-        bson_append_finish_object(&doc);
-        bson_finish(&doc);
-
-        res = mongo_update(conn, blocks_name, &cond, &doc,
-            MONGO_UPDATE_UPSERT, NULL);
-        bson_destroy(&doc);
+    bson_init(&doc);
+    bson_append_start_object(&doc, "$setOnInsert");
+    char * comp_out = get_compress_buf();
+    size_t comp_size = snappy_max_compressed_length(reallen);
+    if((res = snappy_compress(buf + blk_offset, reallen,
+        comp_out, &comp_size)) != SNAPPY_OK) {
+        fprintf(stderr, "Error compressing input: %d\n", res);
+        return -EIO;
     }
+    bson_append_binary(&doc, "data", 0, comp_out, comp_size);
+    bson_append_int(&doc, "offset", blk_offset);
+    bson_append_int(&doc, "size", size);
+    bson_append_finish_object(&doc);
+    bson_finish(&doc);
 
+    res = mongo_update(conn, blocks_name, &cond, &doc,
+        MONGO_UPDATE_UPSERT, NULL);
+    bson_destroy(&doc);
     bson_destroy(&cond);
 
     if(res != MONGO_OK) {
@@ -302,6 +287,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
     if(write_end > e->size)
         e->size = write_end;
     res = insert_hash(&e->wr_extent_root, offset, size, hash);
+
     if(now - e->wr_extent_updated > 3) {
         res = serialize_extent(e, e->wr_extent_root);
         if(res != 0) {
@@ -314,12 +300,6 @@ int mongo_write(const char *path, const char *buf, size_t size,
     pthread_mutex_unlock(&e->wr_extent_lock);
     if(res != 0)
         return res;
-/*
-    if(write_end > e->size) {
-        e->size = write_end;
-        if((res = commit_inode(e)) != 0)
-            return 0;
-    }*/
     return size;
 }
 
@@ -336,12 +316,23 @@ int do_trunc(struct inode * e, off_t off) {
         return 0;
     }
 
-    pthread_rwlock_wrlock(&e->rd_extent_lock);
-    free_extent_tree(e->rd_extent_root);
-    e->rd_extent_root = NULL;
-    if((res = deserialize_extent(e, 0, off)) != 0) {
-        pthread_rwlock_unlock(&e->rd_extent_lock);
-        return res;
+    if(off > 0) {
+        pthread_mutex_lock(&e->wr_extent_lock);
+        if((res = serialize_extent(e, e->wr_extent_root)) != 0) {
+            pthread_mutex_unlock(&e->wr_extent_lock);
+            return res;
+        }
+        free_extent_tree(e->wr_extent_root);
+        e->wr_extent_root = NULL;
+        pthread_mutex_unlock(&e->wr_extent_lock);
+
+        pthread_rwlock_wrlock(&e->rd_extent_lock);
+        free_extent_tree(e->rd_extent_root);
+        e->rd_extent_root = NULL;
+        if((res = deserialize_extent(e, 0, off)) != 0) {
+            pthread_rwlock_unlock(&e->rd_extent_lock);
+            return res;
+        }
     }
 
     bson_init(&cond);
@@ -351,21 +342,20 @@ int do_trunc(struct inode * e, off_t off) {
     res = mongo_remove(conn, extents_name, &cond, NULL);
     bson_destroy(&cond);
     if(res != 0) {
-        pthread_rwlock_unlock(&e->rd_extent_lock);
+        if(off > 0)
+            pthread_rwlock_unlock(&e->rd_extent_lock);
         fprintf(stderr, "Error removing extents in do_truncate\n");
         return -EIO;
     }
 
-    if((res = serialize_extent(e, e->rd_extent_root)) != 0) {
+    if(off > 0) {
+        if((res = serialize_extent(e, e->rd_extent_root)) != 0) {
+            pthread_rwlock_unlock(&e->rd_extent_lock);
+            fprintf(stderr, "Error updating extents in do_truncate\n");
+            return -EIO;
+        }
         pthread_rwlock_unlock(&e->rd_extent_lock);
-        fprintf(stderr, "Error updating extents in do_truncate\n");
-        return -EIO;
     }
-    pthread_mutex_lock(&e->wr_extent_lock);
-    free_extent_tree(e->wr_extent_root);
-    e->wr_extent_root = NULL;
-    pthread_mutex_unlock(&e->wr_extent_lock);
-    pthread_rwlock_unlock(&e->rd_extent_lock);
 
     return 0;
 }

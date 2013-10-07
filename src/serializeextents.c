@@ -60,6 +60,7 @@ int serialize_extent(struct inode * e, struct enode * root) {
 			return -EIO;
 		}
 
+
 		bson_init(&cond);
 		bson_append_oid(&cond, "inode", &e->oid);
 		bson_append_start_object(&cond, "start");
@@ -72,8 +73,6 @@ int serialize_extent(struct inode * e, struct enode * root) {
 		bson_append_oid(&cond, "$ne", &docid);
 		bson_append_finish_object(&cond);
 		bson_finish(&cond);
-		fprintf(stderr, "Removing old extents:\n");
-		bson_print(&cond);
 
 		res = mongo_remove(conn, extents_name, &cond, NULL);
 		bson_destroy(&cond);
@@ -97,10 +96,8 @@ int deserialize_extent(struct inode * e, off_t off, size_t len) {
 	bson_append_start_object(&cond, "$query");
 	bson_append_oid(&cond, "inode", &e->oid);
 	bson_append_start_object(&cond, "start");
-	bson_append_long(&cond, "$lte", off);
-	bson_append_finish_object(&cond);
-	bson_append_start_object(&cond, "end");
-	bson_append_long(&cond, "$gte", off + len);
+	bson_append_long(&cond, "$gte", off);
+	bson_append_long(&cond, "$lte", off + len);
 	bson_append_finish_object(&cond);
 	bson_append_finish_object(&cond);
 	bson_append_start_object(&cond, "$orderby");
@@ -108,6 +105,7 @@ int deserialize_extent(struct inode * e, off_t off, size_t len) {
 	bson_append_int(&cond, "_id", 1);
 	bson_append_finish_object(&cond);
 	bson_finish(&cond);
+	bson_print(&cond);
 
 	mongo_cursor_init(&curs, conn, extents_name);
 	mongo_cursor_set_query(&curs, &cond);

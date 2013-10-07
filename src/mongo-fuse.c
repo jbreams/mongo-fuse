@@ -311,16 +311,18 @@ static int mongo_flock(const char * path, struct fuse_file_info * fi, int op) {
 
 static int mongo_flush(const char * path, struct fuse_file_info * fi) {
     struct inode * e = (struct inode*)fi->fh;
-    int res;
+    int res = 0;
     pthread_mutex_lock(&e->wr_extent_lock);
-    if(!e->wr_extent_root) {
-        pthread_mutex_unlock(&e->wr_extent_lock);
-        return 0;
-    }
     res = serialize_extent(e, e->wr_extent_root);
+    if(res != 0)
+        goto end;
+    res = commit_inode(e);
+    if(res != 0)
+        goto end;
     e->wr_extent_updated = time(NULL);
+end:
     pthread_mutex_unlock(&e->wr_extent_lock);
-    return 0;
+    return res;
 }
 
 static int mongo_release(const char * path, struct fuse_file_info * fi) {

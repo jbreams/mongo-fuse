@@ -71,7 +71,6 @@ int commit_inode(struct inode * e) {
     bson_append_long(&doc, "owner", e->owner);
     bson_append_long(&doc, "group", e->group);
     bson_append_long(&doc, "size", e->size);
-    bson_append_int(&doc, "blocksize", e->blocksize);
     if(e->dev > 0)
         bson_append_long(&doc, "dev", e->dev);
     bson_append_time_t(&doc, "created", e->created);

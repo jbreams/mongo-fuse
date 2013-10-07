@@ -11,7 +11,8 @@ struct extent {
     char data[1];
 };
 
-#define BLOCKS_PER_EXTENT 512
+#define BLOCKS_PER_EXTENT 2
+//#define BLOCKS_PER_EXTENT 512
 #define MAX_BLOCK_SIZE 65536
 #define TREE_HEIGHT_LIMIT 64
 #define LEFT 0
@@ -53,7 +54,6 @@ struct inode {
     uint64_t dev;
     time_t created;
     time_t modified;
-    uint32_t blocksize;
     char * data;
     size_t datalen;
 
