@@ -97,7 +97,8 @@ int deserialize_extent(struct inode * e, off_t off, size_t len) {
 	bson_append_oid(&cond, "inode", &e->oid);
 	bson_append_start_object(&cond, "start");
 	bson_append_long(&cond, "$gte", off);
-	bson_append_long(&cond, "$lte", off + len);
+	// This breaks reading. This query is terrible and broken.
+	//bson_append_long(&cond, "$lte", off + len);
 	bson_append_finish_object(&cond);
 	bson_append_finish_object(&cond);
 	bson_append_start_object(&cond, "$orderby");

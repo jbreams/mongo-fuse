@@ -326,9 +326,6 @@ end:
 }
 
 static int mongo_release(const char * path, struct fuse_file_info * fi) {
-    int res =mongo_flush(path, fi);
-    if(res != 0)
-        return res;
     struct inode * e = (struct inode*)fi->fh;
     free_inode(e);
     free(e);
