@@ -97,8 +97,7 @@ int commit_inode(struct inode * e) {
 
 void init_inode(struct inode * e) {
     memset(e, 0, sizeof(struct inode));
-    pthread_rwlock_init(&e->rd_extent_lock, NULL);
-    pthread_mutex_init(&e->wr_extent_lock, NULL);
+    pthread_mutex_init(&e->wr_lock, NULL);
 }
 
 int read_inode(const bson * doc, struct inode * out) {
@@ -236,10 +235,8 @@ int create_inode(const char * path, mode_t mode, const char * data) {
         e.datalen = 0;
         e.size = 0;
     }
-    e.rd_extent_root = NULL;
-    e.wr_extent_root = NULL;
-    e.wr_extent_updated = 0;
-    e.rd_extent_updated = 0;
+    e.wr_extent = NULL;
+    e.wr_age = 0;
 
     res = commit_inode(&e);
     free_inode(&e);
@@ -254,8 +251,6 @@ void free_inode(struct inode *e) {
         free(e->dirents);
         e->dirents = next;
     }
-    if(e->rd_extent_root)
-        free_extent_tree(e->rd_extent_root);
-    if(e->wr_extent_root)
-        free_extent_tree(e->wr_extent_root);
+    if(e->wr_extent)
+        free(e->wr_extent);
 }

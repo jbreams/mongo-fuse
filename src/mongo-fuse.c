@@ -27,8 +27,8 @@ char * maps_name = "test.maps";
 char * extents_name = "test.extents";
 char * inodes_coll = "inodes";
 char * dbname = "test";
-const char * mongo_host = "127.0.0.1";
-int mongo_port = 27017;
+const char * mongo_host = "/tmp/mongodb-27017.sock";
+int mongo_port = -1;
 
 int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     off_t offset, struct fuse_file_info *fi);
@@ -136,6 +136,20 @@ static int mongo_truncate(const char * path, off_t off) {
     commit_inode(&e);
     free_inode(&e);
     return 0;
+}
+
+static int mongo_ftruncate(const char * path, off_t off,
+    struct fuse_file_info * fi) {
+    struct inode * e = (struct inode*)fi->fh;
+    int res;
+
+    if(off == e->size)
+        return 0;
+
+    res = do_trunc(e, off);
+    if(res != 0)
+        return res;
+    return commit_inode(e);
 }
 
 static int mongo_link(const char * path, const char * newpath) {
@@ -312,17 +326,24 @@ static int mongo_flock(const char * path, struct fuse_file_info * fi, int op) {
 static int mongo_flush(const char * path, struct fuse_file_info * fi) {
     struct inode * e = (struct inode*)fi->fh;
     int res = 0;
-    pthread_mutex_lock(&e->wr_extent_lock);
-    res = serialize_extent(e, e->wr_extent_root);
-    if(res != 0)
-        goto end;
+    pthread_mutex_lock(&e->wr_lock);
+    if(e->wr_extent) {
+        res = serialize_extent(e, e->wr_extent);
+        if(res != 0)
+            goto end;
+    }
     res = commit_inode(e);
     if(res != 0)
         goto end;
-    e->wr_extent_updated = time(NULL);
+    e->wr_age = time(NULL);
 end:
-    pthread_mutex_unlock(&e->wr_extent_lock);
+    pthread_mutex_unlock(&e->wr_lock);
     return res;
+}
+
+static int mongo_fsync(const char * path, int syncdata,
+    struct fuse_file_info * fi) {
+    return mongo_flush(path, fi);
 }
 
 static int mongo_release(const char * path, struct fuse_file_info * fi) {
@@ -350,6 +371,7 @@ static struct fuse_operations mongo_oper = {
     .write      = mongo_write,
     .create     = mongo_create,
     .truncate   = mongo_truncate,
+    .ftruncate  = mongo_ftruncate,
     .mkdir      = mongo_mkdir,
     .unlink     = mongo_unlink,
     .link       = mongo_link,
@@ -362,6 +384,7 @@ static struct fuse_operations mongo_oper = {
     .symlink    = mongo_symlink,
     .readlink   = mongo_readlink,
     .flush      = mongo_flush,
+    .fsync      = mongo_fsync,
     .release    = mongo_release,
     .init       = mongo_initfs
 #if FUSE_VERSION > 28

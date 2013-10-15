@@ -236,26 +236,25 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
     size_t pathlen = e->dirents->len;
     char * filename = (char*)path + pathlen;
     char * generation = (char*)p;
+    struct elist * root = init_elist();
+
+    if(!root)
+        return -ENOMEM;
 
     if(e->mode & S_IFDIR)
         return 0;
 
-    while(*(filename-1) != '/') filename--;
-
-    pthread_rwlock_wrlock(&e->rd_extent_lock);
-    free_extent_tree(e->rd_extent_root);
-    e->rd_extent_root = NULL;
-    e->rd_extent_updated = 0;
-    res = deserialize_extent(e, 0, e->size);
+    res = deserialize_extent(e, 0, e->size, root);
     if(res != 0) {
-        pthread_rwlock_unlock(&e->rd_extent_lock);
+        free(root);
         return res;
     }
     bson_oid_gen(&newid);
     memcpy(&e->oid, &newid, sizeof(bson_oid_t));
-    res = serialize_extent(e, e->rd_extent_root);
-    pthread_rwlock_unlock(&e->rd_extent_lock);
-
+    res = serialize_extent(e, root);
+    free(root);
+    
+    while(*(filename-1) != '/') filename--;
     struct dirent * d = malloc(sizeof(struct dirent) + pathlen + 21);
     d->len = sprintf(d->path, "%s/.snapshot/%s/%s", parent, generation, filename);
     d->next = NULL;

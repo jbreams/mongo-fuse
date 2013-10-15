@@ -11,10 +11,11 @@ struct extent {
     char data[1];
 };
 
-#define BLOCKS_PER_EXTENT 2
-//#define BLOCKS_PER_EXTENT 512
+//#define BLOCKS_PER_EXTENT 2
+#define BLOCKS_PER_EXTENT 512
 #define MAX_BLOCK_SIZE 65536
 #define TREE_HEIGHT_LIMIT 64
+#define HASH_LEN 20
 #define LEFT 0
 #define RIGHT 1
 
@@ -25,21 +26,19 @@ struct dirent {
 };
 
 struct enode {
-    int c;
-    struct enode *links[2], *n;
     off_t off;
     size_t len;
-    int empty;
-    uint8_t hash[20];
+    uint32_t seq;
+    char empty;
+    char skip;
+    uint8_t hash[HASH_LEN];
 };
 
-struct enode_iter {
-    struct enode * root;
-    struct enode * cur;
-    size_t top;
-    struct enode * path_stack[TREE_HEIGHT_LIMIT];
-    struct enode ** path;
-    size_t pathsize;
+struct elist {
+    size_t nnodes;
+    size_t nslots;
+    char sorted;
+    struct enode list[1];
 };
 
 struct inode {
@@ -57,13 +56,9 @@ struct inode {
     char * data;
     size_t datalen;
 
-    pthread_mutex_t wr_extent_lock;
-    struct enode * wr_extent_root;
-    time_t wr_extent_updated;
-
-    pthread_rwlock_t rd_extent_lock;
-    struct enode * rd_extent_root;
-    time_t rd_extent_updated;
+    struct elist * wr_extent;
+    pthread_mutex_t wr_lock;
+    time_t wr_age;
 };
 
 mongo * get_conn();
@@ -72,17 +67,14 @@ void teardown_threading();
 char * get_compress_buf();
 char * get_extent_buf();
 
-void remove_range(off_t off, size_t len, struct enode ** root);
-struct enode * iter_next(struct enode_iter * trav);
-struct enode * start_iter(struct enode_iter * trav,
-    struct enode * root, off_t off);
-void iter_finish(struct enode_iter * trav);
-void free_extent_tree(struct enode * root);
-int insert_hash(struct enode ** r, off_t off, size_t len, uint8_t hash[20]);
-int insert_empty(struct enode **r, off_t off, size_t len);
-
-int serialize_extent(struct inode * e, struct enode * root);
-int deserialize_extent(struct inode * e, off_t off, size_t len);
+int insert_hash(struct elist ** list, off_t off,
+    size_t len, uint8_t hash[HASH_LEN]);
+int insert_empty(struct elist ** list, off_t off, size_t len);
+int deserialize_extent(struct inode * e, off_t off,
+    size_t len, struct elist * out);
+int serialize_extent(struct inode * e, struct elist * list);
+size_t get_offset_index(struct elist * list, off_t offset);
+struct elist * init_elist();
 
 void free_inode(struct inode *e);
 int get_inode(const char * path, struct inode * out);
