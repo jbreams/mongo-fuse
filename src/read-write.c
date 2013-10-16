@@ -96,7 +96,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     struct inode * e;
     int res;
     const off_t end = size + offset;
-    size_t tocopy, skip, idx;
+    size_t idx;
     struct elist * list;
     char * extent_buf = get_extent_buf();
 
@@ -125,33 +125,30 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         return size;
     }
 
-    const size_t l_nodes = list->nnodes;
-    for(idx = 0; idx < l_nodes; idx++) {
+    if(list->list[0].off > offset)
+        memset(buf, 0, list->list[0].off - offset);
+
+    for(idx = 0; idx < list->nnodes; idx++) {
         const struct enode * cur = &list->list[idx];
         const off_t curend = cur->off + cur->len;
-        char * olock, *ilock;
+        size_t inskip = 0, tocopy = cur->len, outskip = 0;
 
-        ilock = extent_buf;
-        olock = buf;
-        tocopy = cur->len;
-
-        if(cur->off > offset) {
-            ilock += 
-        }
+        if(cur->off < offset)
+            inskip = offset - cur->off;
+        if(cur->off > offset)
+            outskip = cur->off - offset;
+        if(curend > end)
+            tocopy -= (curend - end);
 
         if(cur->empty) {
-            fprintf(stderr, "Writing empty at skip: %lu tocopy: %lu offset: %llu curoff: %llu curlen: %lu\n",
-                skip, tocopy, offset, cur->off, cur->len);
-         //   memset(block, 0, tocopy);
+            memset(buf + outskip, 0, tocopy);
             continue;
         }
 
-        fprintf(stderr, "Writing block at skip: %lu tocopy: %lu offset: %llu curoff: %llu curlen: %lu\n",
-            skip, tocopy, offset, cur->off, cur->len);
         res = resolve_block(e, (uint8_t*)cur->hash, extent_buf);
         if(res != 0)
             return res;
-        memcpy(block, extent_buf + skip, tocopy);
+        memcpy(buf + outskip, extent_buf + inskip, tocopy);
     }
 
     free(list);
