@@ -132,22 +132,28 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         const struct enode * cur = &list->list[idx];
         const off_t curend = cur->off + cur->len;
         size_t inskip = 0, tocopy = cur->len, outskip = 0;
-
+ 
+        if(cur->off > end || curend < offset)
+            continue;
+ 
         if(cur->off < offset)
             inskip = offset - cur->off;
         if(cur->off > offset)
             outskip = cur->off - offset;
-        if(curend > end)
-            tocopy -= (curend - end);
-
+        tocopy = end > curend ? curend : end;
+        tocopy -= (cur->off + inskip);
+ 
         if(cur->empty) {
+            printf("Adding empty block at %llu %lu\n", offset, tocopy);
             memset(buf + outskip, 0, tocopy);
             continue;
         }
-
+ 
         res = resolve_block(e, (uint8_t*)cur->hash, extent_buf);
         if(res != 0)
             return res;
+        fprintf(stderr, "Copying %llu+%lu, %llu+%lu, %lu\n",
+            offset, outskip, cur->off, inskip, tocopy);
         memcpy(buf + outskip, extent_buf + inskip, tocopy);
     }
 
@@ -163,14 +169,11 @@ int mongo_write(const char *path, const char *buf, size_t size,
     size_t reallen;
     int32_t realend = size, blk_offset = 0;
     const off_t write_end = size + offset;
-    char * zlock;
+    char * lock;
     bson doc, cond;
     mongo * conn = get_conn();
     uint8_t hash[20];
     time_t now = time(NULL);
-
-    if(size > MAX_BLOCK_SIZE)
-        return -EFBIG;
 
     e = (struct inode*)fi->fh;
     if((res = get_cached_inode(path, e)) != 0)
@@ -191,9 +194,9 @@ int mongo_write(const char *path, const char *buf, size_t size,
     */
     __m128i zero = _mm_setzero_si128();
     if(buf[size - 1] == '\0') {
-        zlock = (char*)buf + size - 16;
+        lock = (char*)buf + size - 16;
         while(zlock >= buf) {
-            __m128i x = _mm_loadu_si128((__m128i*)zlock);
+            __m128i x = _mm_loadu_si128((__m128i*)lock);
             res = _mm_movemask_epi8(_mm_cmpeq_epi8(zero, x));
             if(res != 0xffff) {
                 realend = zlock - buf + 16;
@@ -202,22 +205,22 @@ int mongo_write(const char *path, const char *buf, size_t size,
                 realend++;
                 break;
             }
-            zlock -= 16;
+            lock -= 16;
         }
     }
     if(buf[0] == '\0') {
-        zlock = (char*)buf;
-        while(zlock - buf < realend) {
-            __m128i x = _mm_loadu_si128((__m128i*)zlock);
+        lock = (char*)buf;
+        while(lock - buf < realend) {
+            __m128i x = _mm_loadu_si128((__m128i*)lock);
             res = _mm_movemask_epi8(_mm_cmpeq_epi8(zero, x));
             if(res != 0xffff) {
-                blk_offset = zlock - buf;
+                blk_offset = lock - buf;
                 while(blk_offset < realend && buf[blk_offset] == '\0')
                     blk_offset++;
                 blk_offset -= blk_offset > 0 ? 1 : 0;
                 break;
             }
-            zlock += 16;
+            lock += 16;
         }
     }
     reallen = realend - blk_offset;

@@ -223,7 +223,10 @@ int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist * o
 	mongo * conn = get_conn();
 	mongo_cursor curs;
 	int res;
+	const off_t end = off + len;
 
+
+	/* start <= end && end >= start */
 	bson_init(&cond);
 	bson_append_start_object(&cond, "$query");
 	bson_append_oid(&cond, "inode", &e->oid);
@@ -250,7 +253,7 @@ int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist * o
 		const bson * curdoc = mongo_cursor_bson(&curs);
 		bson_iterator topi, i, sub;
 		bson_type bt;
-		off_t curoff = 0, curend = 0;
+		off_t curoff = 0;
 		const char * key;
 		bson_iterator_init(&topi, curdoc);
 		while(bson_iterator_next(&topi) != 0) {
@@ -259,14 +262,13 @@ int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist * o
 				bson_iterator_subiterator(&topi, &i);
 			else if(strcmp(key, "start") == 0)
 				curoff = bson_iterator_long(&topi);
-			else if(strcmp(key, "end") == 0)
-				curend = bson_iterator_long(&topi);
 		}
 
 		while(bson_iterator_next(&i) != 0) {
 			bson_iterator_subiterator(&i, &sub);
 			uint8_t * hash = NULL;
-			int len = 0;
+			int curlen = 0;
+			off_t curend;
 			int empty = 0;
 			while((bt = bson_iterator_next(&sub)) != 0) {
 				key = bson_iterator_key(&sub);
@@ -277,21 +279,28 @@ int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist * o
 						hash = (uint8_t*)bson_iterator_bin_data(&sub);
 				}
 				else if(strcmp(key, "len") == 0)
-					len = bson_iterator_int(&sub);
+					curlen = bson_iterator_int(&sub);
 			}
+
+			curend = curoff + curlen;
+			if(!(curoff <= end && curend >= off)) {
+				curoff += curlen;
+				continue;
+			}
+
 			if(empty) {
-				res = insert_empty(&out, curoff, len);
-				fprintf(stderr, "Inserting empty at %llu %d\n", curoff, len);
+				res = insert_empty(&out, curoff, curlen);
+				fprintf(stderr, "Inserting empty at %llu %d\n", curoff, curlen);
 			}
 			else {
-				res = insert_hash(&out, curoff, len, hash);
-				fprintf(stderr, "Inserting hash at %llu %d\n", curoff, len);
+				res = insert_hash(&out, curoff, curlen, hash);
+				fprintf(stderr, "Inserting hash at %llu %d\n", curoff, curlen);
 			}
 			if(res != 0) {
 				fprintf(stderr, "Error adding hash to extent tree\n");
 				return res;
 			}
-			curoff += len;
+			curoff += curlen;
 		}
 	}
 	mongo_cursor_destroy(&curs);
