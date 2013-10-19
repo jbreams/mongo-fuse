@@ -192,35 +192,34 @@ int mongo_write(const char *path, const char *buf, size_t size,
     * a ~16x speed boost on blocks with lots of zero bytes over the dumb
     * method above.
     */
-    __m128i zero = _mm_setzero_si128();
-    if(buf[size - 1] == '\0') {
+    if(size > 16) {
+        __m128i zero = _mm_setzero_si128();
         lock = (char*)buf + size - 16;
-        while(zlock >= buf) {
+        while(lock >= buf) {
             __m128i x = _mm_loadu_si128((__m128i*)lock);
             res = _mm_movemask_epi8(_mm_cmpeq_epi8(zero, x));
-            if(res != 0xffff) {
-                realend = zlock - buf + 16;
-                while(realend > 0 && buf[realend] == '\0')
-                    realend--;
-                realend++;
-                break;
+            if(res == 0xffff) {
+                lock -= 16;
+                continue;
             }
-            lock -= 16;
+            fprintf(stderr, "Found end %lu %d %d\n", lock - buf, res, fls(res ^ 0xffff));
+            realend = lock - buf + fls(res ^ 0xffff) - 1;
+            break;
         }
-    }
-    if(buf[0] == '\0') {
+        if(lock <= buf)
+            realend = 0;
+
         lock = (char*)buf;
         while(lock - buf < realend) {
             __m128i x = _mm_loadu_si128((__m128i*)lock);
             res = _mm_movemask_epi8(_mm_cmpeq_epi8(zero, x));
-            if(res != 0xffff) {
-                blk_offset = lock - buf;
-                while(blk_offset < realend && buf[blk_offset] == '\0')
-                    blk_offset++;
-                blk_offset -= blk_offset > 0 ? 1 : 0;
-                break;
+            if(res == 0xffff) {
+                lock += 16;
+                continue;
             }
-            lock += 16;
+            fprintf(stderr, "Found beginning %lu %d %d\n", lock - buf, res, ffs(res ^ 0xffff));
+            blk_offset = lock - buf + ffs(res ^ 0xffff) - 1;
+            break;
         }
     }
     reallen = realend - blk_offset;
@@ -233,9 +232,9 @@ int mongo_write(const char *path, const char *buf, size_t size,
                 return -ENOMEM;
             }
         }
+        fprintf(stderr, "Inserting empty\n");
         res = insert_empty(&e->wr_extent, offset, size);
-        pthread_mutex_unlock(&e->wr_lock);
-        return res;
+        goto end;
     }
 
 #ifdef __APPLE__
@@ -274,9 +273,6 @@ int mongo_write(const char *path, const char *buf, size_t size,
     }
 
     pthread_mutex_lock(&e->wr_lock);
-    if(write_end > e->size)
-        e->size = write_end;
-
     if(e->wr_extent == NULL) {
         e->wr_extent = init_elist();
         if(!e->wr_extent) {
@@ -285,6 +281,10 @@ int mongo_write(const char *path, const char *buf, size_t size,
         }
     }
     res = insert_hash(&e->wr_extent, offset, size, hash);
+
+end:
+    if(write_end > e->size)
+        e->size = write_end;
 
     if(now - e->wr_age > 3) {
         res = serialize_extent(e, e->wr_extent);
