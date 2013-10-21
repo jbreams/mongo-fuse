@@ -23,6 +23,7 @@
 
 extern char * blocks_name;
 extern char * extents_name;
+extern char * inodes_name;
 
 static int resolve_block(struct inode * e, uint8_t hash[HASH_LEN], char * buf) {
     bson query;
@@ -97,7 +98,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     int res;
     const off_t end = size + offset;
     size_t idx;
-    struct elist * list;
+    struct elist * list = NULL;
     char * extent_buf = get_extent_buf();
 
     e = (struct inode*)fi->fh;
@@ -107,16 +108,18 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     if(e->mode & S_IFDIR)
         return -EISDIR;
 
-    if(offset > e->size)
-        return 0;
+    pthread_mutex_lock(&e->wr_lock);
+    if(e->wr_extent) {
+        if((res = serialize_extent(e, e->wr_extent)) != 0) {
+            pthread_mutex_unlock(&e->wr_lock);
+            return res;
+        }
+        e->wr_extent->nnodes = 0;
+    }
+    e->wr_age = time(NULL);
+    pthread_mutex_unlock(&e->wr_lock);
 
-    list = init_elist();
-    if(!list)
-        return -ENOMEM;
-
-    fprintf(stderr, "Starting read of %llu %lu\n", offset, size);
-
-    if((res = deserialize_extent(e, offset, size, list)) != 0)
+    if((res = deserialize_extent(e, offset, size, &list)) != 0)
         return res;
 
     if(list->nnodes == 0) {
@@ -135,6 +138,7 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
  
         if(cur->off > end || curend < offset)
             continue;
+
  
         if(cur->off < offset)
             inskip = offset - cur->off;
@@ -144,7 +148,6 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         tocopy -= (cur->off + inskip);
  
         if(cur->empty) {
-            printf("Adding empty block at %llu %lu\n", offset, tocopy);
             memset(buf + outskip, 0, tocopy);
             continue;
         }
@@ -152,13 +155,40 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
         res = resolve_block(e, (uint8_t*)cur->hash, extent_buf);
         if(res != 0)
             return res;
-        fprintf(stderr, "Copying %llu+%lu, %llu+%lu, %lu\n",
-            offset, outskip, cur->off, inskip, tocopy);
         memcpy(buf + outskip, extent_buf + inskip, tocopy);
     }
 
     free(list);
     return size;
+}
+
+int update_filesize(struct inode * e, off_t newsize) {
+    bson cond, doc;
+    mongo * conn = get_conn();
+    int res;
+
+    if(newsize < e->size)
+        return 0;
+
+    e->size = newsize;
+
+    bson_init(&cond);
+    bson_append_oid(&cond, "_id", &e->oid);
+    bson_finish(&cond);
+
+    bson_init(&doc);
+    bson_append_start_object(&doc, "$set");
+    bson_append_long(&doc, "size", newsize);
+    bson_append_finish_object(&doc);
+    bson_finish(&doc);
+
+    res = mongo_update(conn, inodes_name, &cond, &doc, 0, NULL);
+    bson_destroy(&cond);
+    bson_destroy(&doc);
+
+    if(res != 0)
+        return -EIO;
+    return 0;
 }
 
 int mongo_write(const char *path, const char *buf, size_t size,
@@ -189,10 +219,11 @@ int mongo_write(const char *path, const char *buf, size_t size,
     blk_offset -= blk_offset > 0 ? 1 : 0;
     * The code below uses SSE4 instructions to find the first/last
     * zero bytes by doing 16-byte comparisons at a time. This should give
-    * a ~16x speed boost on blocks with lots of zero bytes over the dumb
+    * a ~16 speed boost on blocks with lots of zero bytes over the dumb
     * method above.
     */
-    if(size > 16) {
+    
+    if(size >= 16) {
         __m128i zero = _mm_setzero_si128();
         lock = (char*)buf + size - 16;
         while(lock >= buf) {
@@ -202,8 +233,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
                 lock -= 16;
                 continue;
             }
-            fprintf(stderr, "Found end %lu %d %d\n", lock - buf, res, fls(res ^ 0xffff));
-            realend = lock - buf + fls(res ^ 0xffff) - 1;
+            realend = lock - buf + fls(res ^ 0xffff);
             break;
         }
         if(lock <= buf)
@@ -217,22 +247,14 @@ int mongo_write(const char *path, const char *buf, size_t size,
                 lock += 16;
                 continue;
             }
-            fprintf(stderr, "Found beginning %lu %d %d\n", lock - buf, res, ffs(res ^ 0xffff));
             blk_offset = lock - buf + ffs(res ^ 0xffff) - 1;
             break;
         }
     }
+
     reallen = realend - blk_offset;
     if(reallen == 0) {
         pthread_mutex_lock(&e->wr_lock);
-        if(e->wr_extent == NULL) {
-            e->wr_extent = init_elist();
-            if(!e->wr_extent) {
-                pthread_mutex_unlock(&e->wr_lock);
-                return -ENOMEM;
-            }
-        }
-        fprintf(stderr, "Inserting empty\n");
         res = insert_empty(&e->wr_extent, offset, size);
         goto end;
     }
@@ -259,6 +281,7 @@ int mongo_write(const char *path, const char *buf, size_t size,
     bson_append_binary(&doc, "data", 0, comp_out, comp_size);
     bson_append_int(&doc, "offset", blk_offset);
     bson_append_int(&doc, "size", size);
+    bson_append_time_t(&doc, "created", now);
     bson_append_finish_object(&doc);
     bson_finish(&doc);
 
@@ -273,13 +296,6 @@ int mongo_write(const char *path, const char *buf, size_t size,
     }
 
     pthread_mutex_lock(&e->wr_lock);
-    if(e->wr_extent == NULL) {
-        e->wr_extent = init_elist();
-        if(!e->wr_extent) {
-            pthread_mutex_unlock(&e->wr_lock);
-            return -ENOMEM;
-        }
-    }
     res = insert_hash(&e->wr_extent, offset, size, hash);
 
 end:
@@ -293,9 +309,12 @@ end:
             return res;    
         }
         e->wr_age = now;
-        res = commit_inode(e);
     }
     pthread_mutex_unlock(&e->wr_lock);
+    if(res != 0)
+        return res;
+
+    res = update_filesize(e, write_end);
 
     if(res != 0)
         return res;
@@ -314,17 +333,18 @@ int do_trunc(struct inode * e, off_t off) {
 
     pthread_mutex_lock(&e->wr_lock);
     if(e->wr_extent) {
-        if(off < 0 &&(res = serialize_extent(e, e->wr_extent)) != 0)
+        if(off < 0 && (res = serialize_extent(e, e->wr_extent)) != 0)
             return res;
         e->wr_extent->nnodes = 0;
     }
+    e->wr_age = time(NULL);
     pthread_mutex_unlock(&e->wr_lock);
 
     bson_init(&cond);
     bson_append_oid(&cond, "inode", &e->oid);
     if(off > 0) {
         bson_append_start_object(&cond, "start");
-        bson_append_long(&cond, "$gte", 0);
+        bson_append_long(&cond, "$gte", off);
         bson_append_finish_object(&cond);
     }
     bson_finish(&cond);

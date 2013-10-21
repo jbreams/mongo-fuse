@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include "mongo-fuse.h"
 #include <osxfuse/fuse.h>
+#include <execinfo.h>
 
 extern const char * inodes_name;
 extern const char * locks_name;
@@ -71,8 +72,6 @@ int commit_inode(struct inode * e) {
     bson_append_long(&doc, "owner", e->owner);
     bson_append_long(&doc, "group", e->group);
     bson_append_long(&doc, "size", e->size);
-    if(e->dev > 0)
-        bson_append_long(&doc, "dev", e->dev);
     bson_append_time_t(&doc, "created", e->created);
     bson_append_time_t(&doc, "modified", e->modified);
     if(e->data && e->datalen > 0)
@@ -105,7 +104,6 @@ int read_inode(const bson * doc, struct inode * out) {
     bson_type bt;
     const char * key;
 
-    init_inode(out);
     bson_iterator_init(&i, doc);
     while((bt = bson_iterator_next(&i)) > 0) {
         key = bson_iterator_key(&i);
@@ -123,14 +121,17 @@ int read_inode(const bson * doc, struct inode * out) {
             out->created = bson_iterator_time_t(&i);
         else if(strcmp(key, "modified") == 0)
             out->modified = bson_iterator_time_t(&i);
-        else if(strcmp(key, "dev") == 0)
-            out->dev = bson_iterator_long(&i);
         else if(strcmp(key, "data") == 0) {
             out->datalen = bson_iterator_string_len(&i);
             out->data = malloc(out->datalen + 1);
             strcpy(out->data, bson_iterator_string(&i));
         }
         else if(strcmp(key, "dirents") == 0) {
+            while(out->dirents) {
+                struct dirent * next = out->dirents->next;
+                free(out->dirents);
+                out->dirents = next;
+            }
             bson_iterator_subiterator(&i, &sub);
             while((bt = bson_iterator_next(&sub)) > 0) {
                 int len = bson_iterator_string_len(&sub);
@@ -149,19 +150,7 @@ int read_inode(const bson * doc, struct inode * out) {
     return 0;
 }
 
-int get_cached_inode(const char * path, struct inode * out) {
-    time_t now = time(NULL);
-    int res;
-    if(now - out->updated < 3)
-        return 0;
-
-    res = get_inode(path, out);
-    if(res == 0)
-        out->updated = now;
-    return res;
-}
-
-int get_inode(const char * path, struct inode * out) {
+int get_inode_impl(const char * path, struct inode * out) {
     bson query, doc;
     int res;
     mongo * conn = get_conn();
@@ -183,6 +172,23 @@ int get_inode(const char * path, struct inode * out) {
     bson_destroy(&doc);
 
     return res;
+}
+
+int get_cached_inode(const char * path, struct inode * out) {
+    time_t now = time(NULL);
+    int res;
+    if(now - out->updated < 3)
+        return 0;
+
+    res = get_inode_impl(path, out);
+    if(res == 0)
+        out->updated = now;
+    return res;
+}
+
+int get_inode(const char * path, struct inode * out) {
+    init_inode(out);
+    return get_inode_impl(path, out);
 }
 
 int check_access(struct inode * e, int amode) {

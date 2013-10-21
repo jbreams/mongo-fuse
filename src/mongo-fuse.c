@@ -40,29 +40,37 @@ int mongo_write(const char *path, const char *buf, size_t size,
                off_t offset, struct fuse_file_info *fi);
 int mongo_rename(const char * path, const char * newpath);
 
+static void getattr_impl(struct inode * e, struct stat * stbuf) {
+    memset(stbuf, 0, sizeof(struct stat));
+    stbuf->st_nlink = e->direntcount;
+    stbuf->st_mode = e->mode;
+    if(stbuf->st_mode & S_IFDIR)
+        stbuf->st_nlink++;
+    stbuf->st_uid = e->owner;
+    stbuf->st_gid = e->group;
+    stbuf->st_size = e->size;
+    stbuf->st_ctime = e->created;
+    stbuf->st_mtime = e->modified;
+    stbuf->st_atime = e->modified;
+}
 static int mongo_getattr(const char *path, struct stat *stbuf) {
     int res = 0;
     struct inode e;
 
-    memset(stbuf, 0, sizeof(struct stat));
     res = get_inode(path, &e);
     if(res != 0)
         return res;
 
-    stbuf->st_nlink = e.direntcount;
-    stbuf->st_mode = e.mode;
-    if(stbuf->st_mode & S_IFDIR)
-        stbuf->st_nlink++;
-    stbuf->st_uid = e.owner;
-    stbuf->st_gid = e.group;
-    stbuf->st_size = e.size;
-    stbuf->st_ctime = e.created;
-    stbuf->st_mtime = e.modified;
-    stbuf->st_atime = e.modified;
-    stbuf->st_dev = e.dev;
-
+    getattr_impl(&e, stbuf);
     free_inode(&e);
     return res;
+}
+
+static int mongo_fgetattr(const char *path, struct stat *stbuf,
+    struct fuse_file_info *fi) {
+    struct inode * e = (struct inode *)fi->fh;
+    getattr_impl(e, stbuf);
+    return 0;
 }
 
 static int mongo_open(const char *path, struct fuse_file_info *fi)
@@ -78,6 +86,7 @@ static int mongo_open(const char *path, struct fuse_file_info *fi)
     }
     fi->fh = (uintptr_t)e;
     e->updated = time(NULL);
+    e->wr_age = e->updated;
 
     return 0;
 }
@@ -365,6 +374,7 @@ static void *mongo_initfs(struct fuse_conn_info * conn) {
 
 static struct fuse_operations mongo_oper = {
     .getattr    = mongo_getattr,
+    .fgetattr   = mongo_fgetattr,
     .readdir    = mongo_readdir,
     .open       = mongo_open,
     .read       = mongo_read,

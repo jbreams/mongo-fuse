@@ -22,6 +22,14 @@ struct elist * init_elist() {
 
 int ensure_elist(struct elist ** pout) {
 	struct elist * out = *pout;
+	if(out == NULL) {
+		out = init_elist();
+		if(!out) {
+			*pout = NULL;
+			return -ENOMEM;
+		}
+		*pout = out;
+	}
 	if(out->nnodes + 1 < out->nslots)
 		return 0;
 	out->nslots += BLOCKS_PER_EXTENT;
@@ -47,7 +55,6 @@ int insert_hash(struct elist ** pout, off_t off, size_t len,
 	out->list[idx].empty = 0;
 	out->list[idx].seq = idx;
 	memcpy(out->list[idx].hash, hash, HASH_LEN);
-	out->sorted = 0;
 
 	return 0;
 }
@@ -64,8 +71,7 @@ int insert_empty(struct elist ** pout, off_t off, size_t len) {
 	out->list[idx].len = len;
 	out->list[idx].empty = 1;
 	out->list[idx].seq = idx;
-	out->sorted = 0;
-
+	
 	return 0;
 }
 
@@ -73,76 +79,20 @@ int enode_cmp(const void * ra, const void * rb) {
 	struct enode * a = (struct enode *)ra;
 	struct enode * b = (struct enode *)rb;
 
-	if(a->off < b->off) {
-		if(a->seq < b->seq)
-			return -1;
-		else if(a->seq > b->seq)
-			return 1;
-		return 0;
-	}
-	else if(a->off > b->off) {
-		if(a->seq < b->seq)
-			return -1;
-		else if(a->seq > b->seq)
-			return 1;
-		return 0;
-	}
-	return 0;
-}
-
-size_t get_offset_index(struct elist * list, off_t off) {
-	struct enode s;
-	size_t low = 0, high = list->nnodes - 1, mid;
-	s.off = off;
-	s.seq = 0;
-	while(low <= high) {
-		mid = (low + high) / 2;
-		int res = enode_cmp(&s, &list->list[mid]);
-		if(res == 0)
-			return mid;
-		else if(res == -1)
-			low = mid + 1;
-		else
-			high = mid - 1;
-	}
-	while(mid > 0 && enode_cmp(&s, &list->list[mid]) == -1)
-		mid--;
-	return mid;
+	int res = (a->seq > b->seq) - (a->seq < b->seq);
+	if(res == 0)
+		res = (a->off > b->off) - (a->off < b->off);
+	return res;
 }
 
 int serialize_extent(struct inode * e, struct elist * list) {
 	mongo * conn = get_conn();
 	bson doc, cond;
 	int res, idx, towrite = 0;
-	struct enode * last = NULL;
-	off_t last_end = 0;
 
-	if(!list->sorted) {
-		qsort(list->list, list->nnodes, sizeof(struct enode), enode_cmp);
-		list->sorted = 1;
-	}
-
-	for(idx = 0; idx < list->nnodes; idx++) {
-		struct enode * cur = &list->list[idx];
-		if(last) {
-			if(cur->off >= last->off && cur->len + cur->off < last_end) {
-				cur->skip = 1;
-				continue;
-			}
-			if(last_end > cur->off)
-				last->len -= (cur->off - last_end);
-		} else {
-			last = cur;
-			last_end = cur->off + cur->len;
-		}
-		cur->skip = 0;
-		towrite++;
-	}
-
-	fprintf(stderr, "Writing %d blocks\n", towrite);
-
-	if(towrite == 0)
+	if(list->nnodes == 0)
 		return 0;
+	qsort(list->list, list->nnodes, sizeof(struct enode), enode_cmp);
 
 	for(idx = 0; idx < list->nnodes;) {
 		bson_oid_t docid;
@@ -162,8 +112,6 @@ int serialize_extent(struct inode * e, struct elist * list) {
 			cur = &list->list[idx];
 			char idxstr[10];
 
-			if(cur->skip)
-				continue;
 			if(last_end > 0 && cur->off != last_end)
 				break;
 			
@@ -180,7 +128,6 @@ int serialize_extent(struct inode * e, struct elist * list) {
 			last_end = cur->off + cur->len;
 			towrite++;
 		}
-		printf("Wrote %d\n", towrite);
 		
 		bson_append_finish_array(&doc);
 		bson_append_long(&doc, "end", last_end);
@@ -215,16 +162,17 @@ int serialize_extent(struct inode * e, struct elist * list) {
 		}
 	}
 
+	list->nnodes = 0;
 	return 0;
 }
 
-int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist * out) {
+int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist ** pout) {
 	bson cond;
 	mongo * conn = get_conn();
 	mongo_cursor curs;
 	int res;
 	const off_t end = off + len;
-
+	struct elist * out = NULL;
 
 	/* start <= end && end >= start */
 	bson_init(&cond);
@@ -245,9 +193,6 @@ int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist * o
 
 	mongo_cursor_init(&curs, conn, extents_name);
 	mongo_cursor_set_query(&curs, &cond);
-
-	out->nnodes = 0;
-	fprintf(stderr, "Deserializing extents start >= %llu end <= %llu\n", off + len, off);
 
 	while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
 		const bson * curdoc = mongo_cursor_bson(&curs);
@@ -283,19 +228,15 @@ int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist * o
 			}
 
 			curend = curoff + curlen;
-			if(!(curoff <= end && curend >= off)) {
+			if(!(curoff < end && curend > off)) {
 				curoff += curlen;
 				continue;
 			}
 
-			if(empty) {
+			if(empty)
 				res = insert_empty(&out, curoff, curlen);
-				fprintf(stderr, "Inserting empty at %llu %d\n", curoff, curlen);
-			}
-			else {
+			else
 				res = insert_hash(&out, curoff, curlen, hash);
-				fprintf(stderr, "Inserting hash at %llu %d\n", curoff, curlen);
-			}
 			if(res != 0) {
 				fprintf(stderr, "Error adding hash to extent tree\n");
 				return res;
@@ -305,6 +246,7 @@ int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist * o
 	}
 	mongo_cursor_destroy(&curs);
 	bson_destroy(&cond);
+	*pout = out;
 
 	return 0;
 }

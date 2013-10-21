@@ -41,6 +41,7 @@ int read_dirents(const char * directory,
 
     while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
         struct inode e;
+        init_inode(&e);
         res = read_inode(mongo_cursor_bson(&curs), &e);
         if(res != 0) {
             fprintf(stderr, "Error in read_inode\n");
@@ -80,7 +81,6 @@ int readdir_cb(struct inode * e, void * p,
     stbuf.st_ctime = e->created;
     stbuf.st_mtime = e->modified;
     stbuf.st_atime = e->modified;
-    stbuf.st_dev = e->dev;
 
     struct dirent * cde = e->dirents;
     while(cde) {
@@ -236,7 +236,7 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
     size_t pathlen = e->dirents->len;
     char * filename = (char*)path + pathlen;
     char * generation = (char*)p;
-    struct elist * root = init_elist();
+    struct elist * root = NULL;
 
     if(!root)
         return -ENOMEM;
@@ -244,11 +244,9 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
     if(e->mode & S_IFDIR)
         return 0;
 
-    res = deserialize_extent(e, 0, e->size, root);
-    if(res != 0) {
-        free(root);
+    res = deserialize_extent(e, 0, e->size, &root);
+    if(res != 0)
         return res;
-    }
     bson_oid_gen(&newid);
     memcpy(&e->oid, &newid, sizeof(bson_oid_t));
     res = serialize_extent(e, root);

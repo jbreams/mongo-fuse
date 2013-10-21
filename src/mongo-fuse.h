@@ -30,14 +30,12 @@ struct enode {
     size_t len;
     uint32_t seq;
     char empty;
-    char skip;
     uint8_t hash[HASH_LEN];
 };
 
 struct elist {
     size_t nnodes;
     size_t nslots;
-    char sorted;
     struct enode list[1];
 };
 
@@ -50,7 +48,6 @@ struct inode {
     uint64_t owner;
     uint64_t group;
     uint64_t size;
-    uint64_t dev;
     time_t created;
     time_t modified;
     char * data;
@@ -71,11 +68,11 @@ int insert_hash(struct elist ** list, off_t off,
     size_t len, uint8_t hash[HASH_LEN]);
 int insert_empty(struct elist ** list, off_t off, size_t len);
 int deserialize_extent(struct inode * e, off_t off,
-    size_t len, struct elist * out);
+    size_t len, struct elist ** pout);
 int serialize_extent(struct inode * e, struct elist * list);
-size_t get_offset_index(struct elist * list, off_t offset);
 struct elist * init_elist();
 
+void init_inode(struct inode * e);
 void free_inode(struct inode *e);
 int get_inode(const char * path, struct inode * out);
 int get_cached_inode(const char * path, struct inode * out);
