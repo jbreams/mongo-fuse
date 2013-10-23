@@ -305,33 +305,6 @@ static int mongo_access(const char * path, int amode) {
     return res;
 }
 
-#if FUSE_VERSION > 28
-static int mongo_flock(const char * path, struct fuse_file_info * fi, int op) {
-    struct inode e;
-    int res;
-
-    if((res = get_inode(path, &e)) != 0)
-        return res;
-
-    bson_date_t time;
-    int write;
-    if(op & LOCK_UN) {
-        time = fi->lock_owner & 0x7FFFFFFFFFFFFFFF;
-        write = (fi->lock_owner & 0x8000000000000000) >> 63;
-        res = unlock_inode(&e, write, time);
-        free_inode(&e);
-        return res;
-    }
-    write = op & LOCK_EX;
-    res = lock_inode(&e, write, &time, op & LOCK_NB);
-    free_inode(&e);
-    if(res != 0)
-        return res;
-    fi->lock_owner = ((uint64_t)time) | ((uint64_t)write << 63);
-    return 0;
-}
-#endif
-
 static int mongo_flush(const char * path, struct fuse_file_info * fi) {
     struct inode * e = (struct inode*)fi->fh;
     int res = 0;
@@ -397,9 +370,6 @@ static struct fuse_operations mongo_oper = {
     .fsync      = mongo_fsync,
     .release    = mongo_release,
     .init       = mongo_initfs
-#if FUSE_VERSION > 28
-    .flock      = mongo_flock
-#endif
 };
 
 int main(int argc, char *argv[])
