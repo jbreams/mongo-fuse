@@ -88,7 +88,8 @@ int commit_inode(struct inode * e) {
     bson_destroy(&cond);
     bson_destroy(&doc);
     if(res != MONGO_OK) {
-        fprintf(stderr, "Error committing inode\n");
+        fprintf(stderr, "Error committing inode %s\n",
+            mongo_get_server_err_string(conn));
         return -EIO;
     }
     return 0;

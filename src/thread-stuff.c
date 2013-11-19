@@ -5,10 +5,10 @@
 #include "mongo-fuse.h"
 
 static pthread_key_t tls_key;
-extern const char * mongo_host;
-extern int mongo_port;
 extern const char * inodes_name;
 extern const char * blocks_name;
+extern mongo_host_port dbhost;
+extern mongo_write_concern write_concern;
 
 struct thread_data {
     mongo conn;
@@ -65,11 +65,13 @@ struct mongo * get_conn() {
     if(mongo_is_connected(&td->conn))
         return &td->conn;
 
-    if(mongo_client(&td->conn, mongo_host, mongo_port) != MONGO_OK) {
+    if(mongo_client(&td->conn, dbhost.host, dbhost.port) != MONGO_OK) {
         fprintf(stderr, "Error connecting to mongodb %s:%d\n",
-            mongo_host, mongo_port);
+            dbhost.host, dbhost.port);
         return NULL;
     }
+
+    mongo_set_write_concern(&td->conn, &write_concern);
 
     return &td->conn;
 }

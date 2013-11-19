@@ -6,7 +6,7 @@
 
 #define FUSE_USE_VERSION 26
 
-#include <osxfuse/fuse.h>
+#include <fuse.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -18,17 +18,18 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <limits.h>
+#include <fuse/fuse_opt.h>
+#include <stddef.h>
 #include "mongo-fuse.h"
 
-char * blocks_name = "test.blocks";
-char * inodes_name = "test.inodes";
-char * locks_name = "test.locks";
-char * maps_name = "test.maps";
-char * extents_name = "test.extents";
+char * blocks_name;
+char * inodes_name;
+char * extents_name;
+char * dbname;
 char * inodes_coll = "inodes";
 char * dbname = "test";
-const char * mongo_host = "/tmp/mongodb-27017.sock";
-int mongo_port = -1;
+mongo_host_port dbhost;
+mongo_write_concern write_concern;
 
 int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     off_t offset, struct fuse_file_info *fi);
@@ -372,9 +373,60 @@ static struct fuse_operations mongo_oper = {
     .init       = mongo_initfs
 };
 
+void parse_args(struct fuse_args * rawargs) {
+    // Struct for parsing args
+    struct mongo_fuse_config {
+        char * dbhost;
+        char * mddbname;
+        char * blockdbname;
+        int journal;
+        int writeconcern;
+        int majorityconcern;
+    } opts;
+
+#define MF_OPT(t, p, v) { t, offsetof(struct mongo_fuse_config, p), v }
+
+    static struct fuse_opt mongo_fuse_opts[] = {
+        MF_OPT("dbhost=%s", dbhost, 0),
+        MF_OPT("dbname=%s", mddbname, 0),
+        MF_OPT("blockdbname=%s", blockdbname, 0),
+        MF_OPT("journal", journal, 1),
+        MF_OPT("majority", majorityconcern, 1),
+        MF_OPT("w=%i", writeconcern, 0),
+        FUSE_OPT_END
+    };
+
+    memset(&opts, 0, sizeof(opts));
+    opts.writeconcern = 1;
+    fuse_opt_parse(rawargs, &opts, mongo_fuse_opts, NULL);
+
+    if(!opts.dbhost)
+        opts.dbhost = "127.0.0.1";
+    if(!opts.mddbname)
+        opts.mddbname = "mongofuse";
+
+    asprintf(&blocks_name, "%s.blocks", opts.blockdbname ? opts.blockdbname : opts.mddbname );
+    asprintf(&inodes_name, "%s.inodes", opts.mddbname);
+    asprintf(&extents_name, "%s.extents", opts.mddbname);
+    dbname = strdup(opts.mddbname);
+    mongo_parse_host(opts.dbhost, &dbhost);
+
+    memset(&write_concern, 0, sizeof(write_concern));
+    if(opts.journal == 1)
+        mongo_write_concern_set_j(&write_concern, 1);
+
+    if(opts.majorityconcern == 1)
+        mongo_write_concern_set_mode(&write_concern, "majority");
+    else
+        mongo_write_concern_set_w(&write_concern, opts.writeconcern);
+    mongo_write_concern_finish(&write_concern);
+}
+
 int main(int argc, char *argv[])
 {
+    struct fuse_args rawargs = FUSE_ARGS_INIT(argc, argv);
+    parse_args(&rawargs);
     setup_threading();
-    int rc = fuse_main(argc, argv, &mongo_oper, NULL);
+    int rc = fuse_main(rawargs.argc, rawargs.argv, &mongo_oper, NULL);
     return rc;
 }
