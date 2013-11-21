@@ -16,14 +16,58 @@
 #include <execinfo.h>
 
 extern const char * inodes_name;
+extern const char * locks_name;
+
+int inode_exists(const char * path) {
+    bson query, fields;
+    mongo * conn = get_conn();
+    mongo_cursor curs;
+    int res;
+
+    bson_init(&query);
+    bson_append_string(&query, "dirents", path);
+    bson_finish(&query);
+
+    bson_init(&fields);
+    bson_append_int(&fields, "dirents", 1);
+    bson_append_int(&fields, "_id", 0);
+    bson_finish(&fields);
+
+    mongo_cursor_init(&curs, conn, inodes_name);
+    mongo_cursor_set_query(&curs, &query);
+    mongo_cursor_set_fields(&curs, &fields);
+    mongo_cursor_set_limit(&curs, 1);
+
+    res = mongo_cursor_next(&curs);
+    bson_destroy(&query);
+    bson_destroy(&fields);
+    mongo_cursor_destroy(&curs);
+
+    if(res == 0)
+        return 0;
+    if(curs.err != MONGO_CURSOR_EXHAUSTED)
+        return -EIO;
+    return -ENOENT;
+}
 
 int commit_inode(struct inode * e) {
     bson cond, doc;
     mongo * conn = get_conn();
+    char istr[4];
+    struct dirent * cde = e->dirents;
     int res;
 
     bson_init(&doc);
-    bson_append_oid(&doc, "_id", &e->oid);
+    bson_append_start_object(&doc, "$set");
+    bson_append_start_array(&doc, "dirents");
+    res = 0;
+    while(cde) {
+        bson_numstr(istr, res++);
+        bson_append_string(&doc, istr, cde->path);
+        cde = cde->next;
+    }
+    bson_append_finish_array(&doc);
+
     bson_append_int(&doc, "mode", e->mode);
     bson_append_long(&doc, "owner", e->owner);
     bson_append_long(&doc, "group", e->group);
@@ -32,6 +76,7 @@ int commit_inode(struct inode * e) {
     bson_append_time_t(&doc, "modified", e->modified);
     if(e->data && e->datalen > 0)
         bson_append_string_n(&doc, "data", e->data, e->datalen);
+    bson_append_finish_object(&doc);
     bson_finish(&doc);
 
     bson_init(&cond);
@@ -56,7 +101,7 @@ void init_inode(struct inode * e) {
 }
 
 int read_inode(const bson * doc, struct inode * out) {
-    bson_iterator i;
+    bson_iterator i, sub;
     bson_type bt;
     const char * key;
 
@@ -82,6 +127,25 @@ int read_inode(const bson * doc, struct inode * out) {
             out->data = malloc(out->datalen + 1);
             strcpy(out->data, bson_iterator_string(&i));
         }
+        else if(strcmp(key, "dirents") == 0) {
+            while(out->dirents) {
+                struct dirent * next = out->dirents->next;
+                free(out->dirents);
+                out->dirents = next;
+            }
+            bson_iterator_subiterator(&i, &sub);
+            while((bt = bson_iterator_next(&sub)) > 0) {
+                int len = bson_iterator_string_len(&sub);
+                struct dirent * cde = malloc(sizeof(struct dirent) + len);
+                if(!cde)
+                    return -ENOMEM;
+                strcpy(cde->path, bson_iterator_string(&sub));
+                cde->len = bson_iterator_string_len(&sub);
+                cde->next = out->dirents;
+                out->dirents = cde;
+                out->direntcount++;
+            }
+        }
     }
 
     return 0;
@@ -89,27 +153,22 @@ int read_inode(const bson * doc, struct inode * out) {
 
 int get_inode_impl(const char * path, struct inode * out) {
     bson query, doc;
-    bson_oid_t inode_id;
     int res;
     mongo * conn = get_conn();
 
-    if((res = resolve_dirent(path, &inode_id)) != 0)
-        return res;
-
     bson_init(&query);
-    bson_append_oid(&query, "_id", &inode_id);
+    bson_append_string(&query, "dirents", path);
     bson_finish(&query);
-    bson_print(&query);
 
     res = mongo_find_one(conn, inodes_name, &query,
          bson_shared_empty(), &doc);
-    bson_destroy(&query);
 
     if(res != MONGO_OK) {
-        fprintf(stderr, "Error finding inode %s\n", path);
-        return -EIO;
+        bson_destroy(&query);
+        return -ENOENT;
     }
 
+    bson_destroy(&query);
     res = read_inode(&doc, out);
     bson_destroy(&doc);
 
@@ -150,20 +209,24 @@ int check_access(struct inode * e, int amode) {
 
 int create_inode(const char * path, mode_t mode, const char * data) {
     struct inode e;
+    int pathlen = strlen(path);
     const struct fuse_context * fcx = fuse_get_context();
-    bson_oid_t inode_id;
     int res;
 
-    res = resolve_dirent(path, &inode_id);
+    res = inode_exists(path);
     if(res == 0) {
+        fprintf(stderr, "%s already exists\n", path);
         return -EEXIST;
-    }
-    else if(res == -EIO)
+    } else if(res == -EIO)
         return -EIO;
 
     init_inode(&e);
-    bson_oid_gen(&inode_id);
-    memcpy(&e.oid, &inode_id, sizeof(bson_oid_t));
+    bson_oid_gen(&e.oid);
+    e.dirents = malloc(sizeof(struct dirent) + pathlen);
+    e.dirents->len = pathlen;
+    strcpy(e.dirents->path, path);
+    e.dirents->next = NULL;
+    e.direntcount = 1;
 
     e.mode = mode;
     e.owner = fcx->uid;
@@ -184,16 +247,17 @@ int create_inode(const char * path, mode_t mode, const char * data) {
 
     res = commit_inode(&e);
     free_inode(&e);
-    if(res != 0)
-        return res;
-    res = link_dirent(path, &inode_id);
-
     return res;
 }
 
 void free_inode(struct inode *e) {
     if(e->data)
         free(e->data);
+    while(e->dirents) {
+        struct dirent * next = e->dirents->next;
+        free(e->dirents);
+        e->dirents = next;
+    }
     if(e->wr_extent)
         free(e->wr_extent);
 }

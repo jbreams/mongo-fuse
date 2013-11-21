@@ -4,9 +4,6 @@
 #include <sys/types.h>
 #define FUSE_USE_VERSION 26
 
-// From lookup3.c for cacheing/hashing.
-uint32_t hashlittle( const void *key, size_t length, uint32_t initval);
-
 struct extent {
     char hash[20];
     uint64_t start;
@@ -24,9 +21,6 @@ struct extent {
 
 struct dirent {
     struct dirent * next;
-    bson_oid_t inode;
-    uint32_t hash;
-    time_t cached_on;
     size_t len;
     char path[1];
 };
@@ -48,6 +42,8 @@ struct elist {
 struct inode {
     time_t updated;
     bson_oid_t oid;
+    struct dirent * dirents;
+    int direntcount;
     uint32_t mode;
     uint64_t owner;
     uint64_t group;
@@ -60,8 +56,6 @@ struct inode {
     struct elist * wr_extent;
     pthread_mutex_t wr_lock;
     time_t wr_age;
-
-    struct inode * next;
 };
 
 mongo * get_conn();
@@ -69,14 +63,6 @@ void setup_threading();
 void teardown_threading();
 char * get_compress_buf();
 char * get_extent_buf();
-
-int rename_dirent(const char * path, const char * newpath);
-int unlink_dirent(const char * path);
-int link_dirent(const char * path, bson_oid_t * inode);
-int resolve_dirent(const char * path, bson_oid_t * out);
-int read_dirents(const char * directory,
-    int (*dirent_cb)(const char * path, void * p, size_t parentlen),
-    void * p);
 
 int insert_hash(struct elist ** list, off_t off,
     size_t len, uint8_t hash[HASH_LEN]);
@@ -95,8 +81,15 @@ int create_inode(const char * path, mode_t mode, const char * data);
 int check_access(struct inode * e, int amode);
 int read_inode(const bson * doc, struct inode * out);
 int inode_exists(const char * path);
+#if FUSE_VERSION > 28
+int lock_inode(struct inode * e, int writer, bson_date_t * locktime, int noblock);
+int unlock_inode(struct inode * e, int writer, bson_date_t locktime);
+#endif
 
 int do_trunc(struct inode * e, off_t off);
 
+int read_dirents(const char * directory,
+    int (*dirent_cb)(struct inode *e, void * p,
+    const char * parent, size_t parentlen), void * p);
 int snapshot_dir(const char * path, size_t pathlen, mode_t mode);
 
