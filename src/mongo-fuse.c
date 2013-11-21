@@ -93,7 +93,8 @@ static int mongo_open(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
-static int mongo_create(const char * path, mode_t mode, struct fuse_file_info * fi) {
+static int mongo_create(const char * path, mode_t mode,
+    struct fuse_file_info * fi) {
     int res = create_inode(path, mode, NULL);
     if(res == -EEXIST && fi->flags & O_EXCL)
         return -EEXIST;

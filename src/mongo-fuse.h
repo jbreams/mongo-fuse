@@ -6,6 +6,7 @@
 
 // From lookup3.c for cacheing/hashing.
 uint32_t hashlittle( const void *key, size_t length, uint32_t initval);
+#define INITVAL 0xdeadbeef
 
 struct extent {
     char hash[20];
@@ -17,10 +18,7 @@ struct extent {
 //#define BLOCKS_PER_EXTENT 2
 #define BLOCKS_PER_EXTENT 512
 #define MAX_BLOCK_SIZE 65536
-#define TREE_HEIGHT_LIMIT 64
 #define HASH_LEN 20
-#define LEFT 0
-#define RIGHT 1
 
 struct dirent {
     struct dirent * next;
@@ -46,7 +44,9 @@ struct elist {
 };
 
 struct inode {
-    time_t updated;
+    uint32_t hash;
+    time_t cached_on;
+
     bson_oid_t oid;
     uint32_t mode;
     uint64_t owner;

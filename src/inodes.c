@@ -17,6 +17,82 @@
 
 extern const char * inodes_name;
 
+static struct dirent ** dirent_cache = NULL;
+static int cache_size = 0;
+static int cache_count = 0;
+static int cache_mask = 0;
+static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int cache_inode(struct inode * found) {
+    const uint32_t hash = found->hash & cache_mask;
+    pthread_mutex_lock(&cache_lock);
+    if(!dirent_cache) {
+        cache_size = (1 << 8);
+        cache_mask = cache_size - 1;
+        size_t malloc_size = sizeof(struct inode *) * cache_size;
+        dirent_cache = malloc(malloc_size);
+        if(!dirent_cache) {
+            pthread_mutex_unlock(&cache_lock);
+            return -ENOMEM;
+        }
+        memset(dirent_cache, 0, malloc_size);
+    }
+
+    found->next = dirent_cache[hash];
+    dirent_cache[hash] = found;
+
+    if(++cache_count > cache_size) {
+        struct inode ** old_cache = dirent_cache;
+        size_t old_cache_size = cache_size, i;
+        cache_size <<= 1;
+        cache_mask = cache_size - 1;
+        size_t malloc_size = sizeof(struct inode *) * cache_size;
+        dirent_cache = malloc(malloc_size);
+        if(!dirent_cache) {
+            dirent_cache = old_cache;
+            cache_size = old_cache_size;
+            pthread_mutex_unlock(&cache_lock);
+            return -ENOMEM;
+        }
+        memset(dirent_cache, 0, malloc_size);
+        for(i = 0; i < old_cache_size; i++) {
+            if(!old_cache[i])
+                continue;
+            found = old_cache[i];
+            while(found) {
+                struct inode * fnext = found->next;
+                size_t new_loc = found->hash & cache_mask;
+                found->next = dirent_cache[new_loc];
+                dirent_cache[new_loc] = found;
+                found = fnext;
+            }
+        }
+        free(old_cache);
+    }
+    pthread_mutex_unlock(&cache_lock);
+    return 0;
+}
+
+void uncache_inode(bson_oid_t * inode) {
+    uint32_t hash = hashlittle(inode, sizeof(bson_oid_t), INITVAL);
+    hash &= cache_mask;
+
+    struct inode * found = dirent_cache[hash];
+    struct inode * prev = NULL;
+    while(found && memcmp(found->oid, inode) != 0) {
+        prev = found;
+        found = found->next;
+    }
+    if(found) {
+        if(!prev)
+            dirent_cache[hash] = found->next;
+        else
+            prev->next = found->next;
+        free(found);
+        cache_count--;
+    }
+}
+
 int commit_inode(struct inode * e) {
     bson cond, doc;
     mongo * conn = get_conn();
@@ -55,10 +131,30 @@ void init_inode(struct inode * e) {
     pthread_mutex_init(&e->wr_lock, NULL);
 }
 
-int read_inode(const bson * doc, struct inode * out) {
+int get_inode_impl(const char * path, struct inode * out) {
+    bson query, doc;
+    bson_oid_t inode_id;
     bson_iterator i;
     bson_type bt;
     const char * key;
+    int res;
+    mongo * conn = get_conn();
+
+    if((res = resolve_dirent(path, &inode_id)) != 0)
+        return res;
+
+    bson_init(&query);
+    bson_append_oid(&query, "_id", &inode_id);
+    bson_finish(&query);
+
+    res = mongo_find_one(conn, inodes_name, &query,
+         bson_shared_empty(), &doc);
+    bson_destroy(&query);
+
+    if(res != MONGO_OK) {
+        fprintf(stderr, "Error finding inode %s\n", path);
+        return -EIO;
+    }
 
     bson_iterator_init(&i, doc);
     while((bt = bson_iterator_next(&i)) > 0) {
@@ -84,32 +180,6 @@ int read_inode(const bson * doc, struct inode * out) {
         }
     }
 
-    return 0;
-}
-
-int get_inode_impl(const char * path, struct inode * out) {
-    bson query, doc;
-    bson_oid_t inode_id;
-    int res;
-    mongo * conn = get_conn();
-
-    if((res = resolve_dirent(path, &inode_id)) != 0)
-        return res;
-
-    bson_init(&query);
-    bson_append_oid(&query, "_id", &inode_id);
-    bson_finish(&query);
-
-    res = mongo_find_one(conn, inodes_name, &query,
-         bson_shared_empty(), &doc);
-    bson_destroy(&query);
-
-    if(res != MONGO_OK) {
-        fprintf(stderr, "Error finding inode %s\n", path);
-        return -EIO;
-    }
-
-    res = read_inode(&doc, out);
     bson_destroy(&doc);
 
     return res;
@@ -127,7 +197,7 @@ int get_cached_inode(const char * path, struct inode * out) {
     return res;
 }
 
-int get_inode(const char * path, struct inode * out) {
+int get_inode(const char * path, struct inode ** out) {
     init_inode(out);
     return get_inode_impl(path, out);
 }

@@ -21,7 +21,6 @@ static struct dirent ** dirent_cache = NULL;
 static int cache_size = 0;
 static int cache_count = 0;
 static int cache_mask = 0;
-const uint32_t initval = 0xdeadbeef;
 static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int cache_dirent(struct dirent * found) {
@@ -75,7 +74,7 @@ int cache_dirent(struct dirent * found) {
 }
 
 void uncache_dirent(const char * path, size_t path_len) {
-	uint32_t hash = hashlittle(path, path_len, initval);
+	uint32_t hash = hashlittle(path, path_len, INITVAL);
 	hash &= cache_mask;
 
 	struct dirent * found = dirent_cache[hash];
@@ -100,7 +99,7 @@ int resolve_dirent(const char * path, bson_oid_t * out) {
 	bson_iterator it;
 	size_t path_len = strlen(path);
 	int res;
-	const uint32_t hash = hashlittle(path, path_len, initval);
+	const uint32_t hash = hashlittle(path, path_len, INITVAL);
 	struct dirent * found;
 	time_t now = time(NULL);
 
@@ -159,7 +158,7 @@ int link_dirent(const char * path, bson_oid_t * inode) {
 	bson query, doc;
 	size_t path_len = strlen(path);
 	int res;
-	const uint32_t hash = hashlittle(path, path_len, initval);
+	const uint32_t hash = hashlittle(path, path_len, INITVAL);
 	struct dirent * found;
 	time_t now = time(NULL);
 
@@ -212,8 +211,8 @@ int unlink_dirent(const char * path) {
 	bson_append_start_object(&query, "$pull");
 	bson_append_string(&query, "dirents", path);
 	bson_append_finish_object(&query);
-	bson_append_bool(&query, "new", 1);
 	bson_append_finish_object(&query);
+	bson_append_bool(&query, "new", 1);
 	bson_finish(&query);
 
 	res = mongo_run_command(conn, dbname, &query, &doc);
@@ -351,7 +350,7 @@ int read_dirents(const char * directory,
         if(res != 0)
             break;
 
-        hash = hashlittle(path, path_len, initval);
+        hash = hashlittle(path, path_len, INITVAL);
 		found = calloc(1, sizeof(struct dirent) + path_len);
 		memcpy(&found->inode, inode_id, sizeof(bson_oid_t));
 		found->hash = hash;
