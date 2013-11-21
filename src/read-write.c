@@ -105,9 +105,6 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
     if((res = get_cached_inode(path, e)) != 0)
         return res;
 
-    if(e->mode & S_IFDIR)
-        return -EISDIR;
-
     pthread_mutex_lock(&e->wr_lock);
     if(e->wr_extent) {
         if((res = serialize_extent(e, e->wr_extent)) != 0) {
@@ -208,9 +205,6 @@ int mongo_write(const char *path, const char *buf, size_t size,
     e = (struct inode*)fi->fh;
     if((res = get_cached_inode(path, e)) != 0)
         return res;
-
-    if(e->mode & S_IFDIR)
-        return -EISDIR;
 
     /* Uncomment this for incredibly slow length calculations.
     for(;realend >= 0 && buf[realend] == '\0'; realend--);

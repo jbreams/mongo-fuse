@@ -25,9 +25,10 @@
 char * blocks_name;
 char * inodes_name;
 char * extents_name;
+char * dirents_name;
 char * dbname;
+char * dirents_coll = "dirents";
 char * inodes_coll = "inodes";
-char * dbname = "test";
 mongo_host_port dbhost;
 mongo_write_concern write_concern;
 
@@ -43,7 +44,7 @@ int mongo_rename(const char * path, const char * newpath);
 
 static void getattr_impl(struct inode * e, struct stat * stbuf) {
     memset(stbuf, 0, sizeof(struct stat));
-    stbuf->st_nlink = e->direntcount;
+    stbuf->st_nlink = 1;
     stbuf->st_mode = e->mode;
     if(stbuf->st_mode & S_IFDIR)
         stbuf->st_nlink++;
@@ -165,7 +166,6 @@ static int mongo_ftruncate(const char * path, off_t off,
 static int mongo_link(const char * path, const char * newpath) {
     struct inode e;
     int res;
-    size_t newpathlen = strlen(newpath);
 
     if((res = get_inode(path, &e)) != 0)
         return res;
@@ -175,55 +175,13 @@ static int mongo_link(const char * path, const char * newpath) {
         return -EPERM;
     }
 
-    struct dirent * newlink = malloc(sizeof(struct dirent) + newpathlen);
-    strcpy(newlink->path, newpath);
-    newlink->next = e.dirents;
-    newlink->len = newpathlen;
-    e.dirents = newlink;
-    e.direntcount++;
-    res = commit_inode(&e);
+    res = link_dirent(newpath, &e.oid);
     free_inode(&e);
     return res;
 }
 
 static int mongo_unlink(const char * path) {
-    struct inode e;
-    int res;
-    mongo * conn = get_conn();
-    bson cond;
-
-    if((res = get_inode(path, &e)) != 0)
-        return res;
-
-    if(e.direntcount > 1) {
-        struct dirent * c = e.dirents, *l = NULL;
-        while(c && strcmp(c->path, path) != 0) {
-            l = c;
-            c = c->next;
-        }
-        if(!l)
-            e.dirents = c->next;
-        else
-            l->next = c->next;
-        free(c);
-        e.direntcount--;
-        res = commit_inode(&e);
-        free_inode(&e);
-        return res;
-    }
-
-    res = do_trunc(&e, 0);
-    if(res == 0) {
-        bson_init(&cond);
-        bson_append_oid(&cond, "_id", &e.oid);
-        bson_finish(&cond);
-
-        res = mongo_remove(conn, inodes_name, &cond, NULL);
-        bson_destroy(&cond);
-    }
-
-    free_inode(&e);
-    return res;
+    return unlink_dirent(path);
 }
 
 static int mongo_chmod(const char * path, mode_t mode) {
@@ -408,6 +366,7 @@ void parse_args(struct fuse_args * rawargs) {
     asprintf(&blocks_name, "%s.blocks", opts.blockdbname ? opts.blockdbname : opts.mddbname );
     asprintf(&inodes_name, "%s.inodes", opts.mddbname);
     asprintf(&extents_name, "%s.extents", opts.mddbname);
+    asprintf(&dirents_name, "%s.dirents", opts.mddbname);
     dbname = strdup(opts.mddbname);
     mongo_parse_host(opts.dbhost, &dbhost);
 
