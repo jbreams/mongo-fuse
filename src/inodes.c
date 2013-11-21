@@ -99,7 +99,6 @@ int get_inode_impl(const char * path, struct inode * out) {
     bson_init(&query);
     bson_append_oid(&query, "_id", &inode_id);
     bson_finish(&query);
-    bson_print(&query);
 
     res = mongo_find_one(conn, inodes_name, &query,
          bson_shared_empty(), &doc);
