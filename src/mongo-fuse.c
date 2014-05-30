@@ -11,7 +11,6 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <mongo.h>
 #include <stdlib.h>
 #include <search.h>
 #include <time.h>
@@ -22,14 +21,8 @@
 #include <stddef.h>
 #include "mongo-fuse.h"
 
-char * blocks_name;
-char * inodes_name;
-char * extents_name;
-char * dbname;
-char * inodes_coll = "inodes";
-char * dbname = "test";
-mongo_host_port dbhost;
-mongo_write_concern write_concern;
+mongoc_uri_t * dial_uri = NULL;
+int loglevel = ERROR;
 
 int mongo_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     off_t offset, struct fuse_file_info *fi);
@@ -189,8 +182,9 @@ static int mongo_link(const char * path, const char * newpath) {
 static int mongo_unlink(const char * path) {
     struct inode e;
     int res;
-    mongo * conn = get_conn();
-    bson cond;
+    mongoc_collection_t * coll = get_coll(COLL_INODES);
+    bson_t cond;
+    bson_error_t dberr;
 
     if((res = get_inode(path, &e)) != 0)
         return res;
@@ -215,11 +209,20 @@ static int mongo_unlink(const char * path) {
     res = do_trunc(&e, 0);
     if(res == 0) {
         bson_init(&cond);
-        bson_append_oid(&cond, "_id", &e.oid);
-        bson_finish(&cond);
+        bson_append_oid(&cond, KEYEXP("_id"), &e.oid);
 
-        res = mongo_remove(conn, inodes_name, &cond, NULL);
+        res = mongoc_collection_delete(coll,
+            0, // flags
+            &cond,
+            NULL, // write concern
+            &dberr);
         bson_destroy(&cond);
+
+        if(!res) {
+            logit(ERROR, "Error removing inode for %s: %s", path, dberr.message);
+            free_inode(&e);
+            return -EIO;
+        }
     }
 
     free_inode(&e);
@@ -376,50 +379,34 @@ static struct fuse_operations mongo_oper = {
 void parse_args(struct fuse_args * rawargs) {
     // Struct for parsing args
     struct mongo_fuse_config {
-        char * dbhost;
-        char * mddbname;
-        char * blockdbname;
-        int journal;
-        int writeconcern;
-        int majorityconcern;
+        char * dburi;
+        int loglevel;
     } opts;
 
 #define MF_OPT(t, p, v) { t, offsetof(struct mongo_fuse_config, p), v }
 
     static struct fuse_opt mongo_fuse_opts[] = {
-        MF_OPT("dbhost=%s", dbhost, 0),
-        MF_OPT("dbname=%s", mddbname, 0),
-        MF_OPT("blockdbname=%s", blockdbname, 0),
-        MF_OPT("journal", journal, 1),
-        MF_OPT("majority", majorityconcern, 1),
-        MF_OPT("w=%i", writeconcern, 0),
+        MF_OPT("db=%s", dburi, 0),
+        MF_OPT("loglevel", loglevel, 0),
         FUSE_OPT_END
     };
 
     memset(&opts, 0, sizeof(opts));
-    opts.writeconcern = 1;
     fuse_opt_parse(rawargs, &opts, mongo_fuse_opts, NULL);
 
-    if(!opts.dbhost)
-        opts.dbhost = "127.0.0.1";
-    if(!opts.mddbname)
-        opts.mddbname = "mongofuse";
+    if(!opts.dburi)
+        opts.dburi = "mongodb://localhost/mongofuse";
 
-    asprintf(&blocks_name, "%s.blocks", opts.blockdbname ? opts.blockdbname : opts.mddbname );
-    asprintf(&inodes_name, "%s.inodes", opts.mddbname);
-    asprintf(&extents_name, "%s.extents", opts.mddbname);
-    dbname = strdup(opts.mddbname);
-    mongo_parse_host(opts.dbhost, &dbhost);
+    dial_uri = mongoc_uri_new(opts.dburi);
+    if(!dial_uri) {
+        logit(ERROR, "Error parsing URI. Exiting.");
+        exit(1);
+    }
 
-    memset(&write_concern, 0, sizeof(write_concern));
-    if(opts.journal == 1)
-        mongo_write_concern_set_j(&write_concern, 1);
-
-    if(opts.majorityconcern == 1)
-        mongo_write_concern_set_mode(&write_concern, "majority");
-    else
-        mongo_write_concern_set_w(&write_concern, opts.writeconcern);
-    mongo_write_concern_finish(&write_concern);
+    if(mongoc_uri_get_database(dial_uri) == NULL) {
+        logit(ERROR, "Did not specify a database with URI. Exiting.");
+        exit(1);
+    }
 }
 
 int main(int argc, char *argv[])

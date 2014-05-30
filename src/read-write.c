@@ -21,58 +21,63 @@
 #endif
 #include <xmmintrin.h>
 
-extern char * blocks_name;
-extern char * extents_name;
-extern char * inodes_name;
-
 static int resolve_block(struct inode * e, uint8_t hash[HASH_LEN], char * buf) {
-    bson query;
+    bson_t query, *doc;
+    bson_iter_t iter;
+    bson_error_t dberr;
+    mongoc_collection_t * coll = get_coll(COLL_BLOCKS);
+    mongoc_cursor_t * curs;
     int res;
-    mongo_cursor curs;
-    bson_iterator i;
-    bson_type bt;
-    const char * key;
-    mongo * conn = get_conn();
 
     bson_init(&query);
-    bson_append_binary(&query, "_id", 0, (char*)hash, 20);
-    bson_finish(&query);
+    bson_append_binary(&query, KEYEXP("_id"), 0, hash, 20);
 
-    mongo_cursor_init(&curs, conn, blocks_name);
-    mongo_cursor_set_query(&curs, &query);
-    mongo_cursor_set_limit(&curs, 1);
+    curs = mongoc_collection_find(coll,
+        MONGOC_QUERY_NONE,
+        0, // skip
+        1, // limit
+        0, // batch_size
+        &query,
+        NULL, // fields
+        NULL); // read_prefs
 
-    res = mongo_cursor_next(&curs);
     bson_destroy(&query);
-    if(res != MONGO_OK) {
-        mongo_cursor_destroy(&curs);
+    
+    if(!curs) {
+        logit(ERROR, "Error creating cursor while searching for block");
         return -EIO;
     }
 
-    bson_iterator_init(&i, mongo_cursor_bson(&curs));
+    if(!mongoc_cursor_next(curs, (const bson_t**)&doc)) {
+        if(mongoc_cursor_error(curs, &dberr))
+            logit(ERROR, "Error searching for block: %s", dberr.message);
+        else
+            logit(WARN, "Block requested doesn't exist");
+        mongoc_cursor_destroy(curs);
+        return -EIO;
+    }
+
+    bson_iter_init(&iter, doc);
     size_t outsize, compsize = 0;
     const char * compdata = NULL;
     uint32_t offset = 0, size = 0;
 
-    while((bt = bson_iterator_next(&i)) > 0) {
-        key = bson_iterator_key(&i);
+    while(bson_iter_next(&iter)) {
+        const char * key = bson_iter_key(&iter);
         if(strcmp(key, "data") == 0) {
-            compsize = bson_iterator_bin_len(&i);
-            compdata = bson_iterator_bin_data(&i);
+            bson_subtype_t subtype;
+            bson_iter_binary(&iter, &subtype, 
+                (uint32_t*)&compsize, (const uint8_t**)&compdata);
         }
         else if(strcmp(key, "offset") == 0)
-            offset = bson_iterator_int(&i);
+            offset = bson_iter_int32(&iter);
         else if(strcmp(key, "size") == 0)
-            size = bson_iterator_int(&i);
-    }
-
-    if(curs.err != MONGO_CURSOR_EXHAUSTED) {
-        fprintf(stderr, "Error getting extents %d", curs.err);
-        return -EIO;
+            size = bson_iter_int32(&iter);
     }
 
     if(!compdata) {
-        fprintf(stderr, "No data in block?\n");
+        logit(ERROR, "No data in block?");
+        mongoc_cursor_destroy(curs);
         return -EIO;
     }
 
@@ -80,6 +85,7 @@ static int resolve_block(struct inode * e, uint8_t hash[HASH_LEN], char * buf) {
     if((res = snappy_uncompress(compdata, compsize,
         buf + offset, &outsize)) != SNAPPY_OK) {
         fprintf(stderr, "Error uncompressing block %d\n", res);
+        mongoc_cursor_destroy(curs);
         return -EIO;
     }
     if(offset > 0)
@@ -87,7 +93,7 @@ static int resolve_block(struct inode * e, uint8_t hash[HASH_LEN], char * buf) {
     compsize = outsize + offset;
     if(compsize < size)
         memset(buf + compsize, 0, size - compsize);
-    mongo_cursor_destroy(&curs);
+    mongoc_cursor_destroy(curs);
 
     return 0;
 }
@@ -138,7 +144,6 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
  
         if(cur->off > end || curend < offset)
             continue;
-
  
         if(cur->off < offset)
             inskip = offset - cur->off;
@@ -163,9 +168,10 @@ int mongo_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 int update_filesize(struct inode * e, off_t newsize) {
-    bson cond, doc;
-    mongo * conn = get_conn();
-    int res;
+    bson_t cond, doc, set;
+    bson_error_t dberr;
+    mongoc_collection_t * coll = get_coll(COLL_INODES);
+    bool res;
 
     if(newsize < e->size)
         return 0;
@@ -173,21 +179,31 @@ int update_filesize(struct inode * e, off_t newsize) {
     e->size = newsize;
 
     bson_init(&cond);
-    bson_append_oid(&cond, "_id", &e->oid);
-    bson_finish(&cond);
+    bson_append_oid(&cond, KEYEXP("_id"), &e->oid);
 
     bson_init(&doc);
-    bson_append_start_object(&doc, "$set");
-    bson_append_long(&doc, "size", newsize);
-    bson_append_finish_object(&doc);
-    bson_finish(&doc);
+    bson_append_document_begin(&doc, KEYEXP("$set"), &set);
+    bson_append_int64(&set, KEYEXP("size"), newsize);
+    bson_append_document_end(&doc, &set);
 
-    res = mongo_update(conn, inodes_name, &cond, &doc, 0, NULL);
+    res = mongoc_collection_update(coll,
+        MONGOC_UPDATE_NONE,
+        &cond,
+        &doc,
+        NULL, // write concern
+        &dberr);
+
     bson_destroy(&cond);
     bson_destroy(&doc);
 
-    if(res != 0)
+    if(!res) {
+        char oidstr[25];
+        bson_oid_to_string(&e->oid, oidstr);
+        logit(ERROR, "Error updating file size for %s: %s",
+            oidstr, dberr.message);
         return -EIO;
+    }
+
     return 0;
 }
 
@@ -200,8 +216,9 @@ int mongo_write(const char *path, const char *buf, size_t size,
     int32_t realend = size, blk_offset = 0;
     const off_t write_end = size + offset;
     char * lock;
-    bson doc, cond;
-    mongo * conn = get_conn();
+    bson_t doc, cond, setoninsert;
+    bson_error_t dberr;
+    mongoc_collection_t * coll = get_coll(COLL_BLOCKS);
     uint8_t hash[20];
     time_t now = time(NULL);
 
@@ -266,11 +283,11 @@ int mongo_write(const char *path, const char *buf, size_t size,
 #endif
 
     bson_init(&cond);
-    bson_append_binary(&cond, "_id", 0, (char*)hash, sizeof(hash));
-    bson_finish(&cond);
+    bson_append_binary(&cond, KEYEXP("_id"), 0, hash, sizeof(hash));
 
     bson_init(&doc);
-    bson_append_start_object(&doc, "$setOnInsert");
+    bson_append_document_begin(&doc, KEYEXP("$setOnInsert"), &setoninsert);
+
     char * comp_out = get_compress_buf();
     size_t comp_size = snappy_max_compressed_length(reallen);
     if((res = snappy_compress(buf + blk_offset, reallen,
@@ -278,20 +295,25 @@ int mongo_write(const char *path, const char *buf, size_t size,
         fprintf(stderr, "Error compressing input: %d\n", res);
         return -EIO;
     }
-    bson_append_binary(&doc, "data", 0, comp_out, comp_size);
-    bson_append_int(&doc, "offset", blk_offset);
-    bson_append_int(&doc, "size", size);
-    bson_append_time_t(&doc, "created", now);
-    bson_append_finish_object(&doc);
-    bson_finish(&doc);
 
-    res = mongo_update(conn, blocks_name, &cond, &doc,
-        MONGO_UPDATE_UPSERT, NULL);
+    bson_append_binary(&setoninsert, KEYEXP("data"), 0,
+        (const uint8_t*)comp_out, comp_size);
+    bson_append_int64(&setoninsert, KEYEXP("offset"), blk_offset);
+    bson_append_int64(&setoninsert, KEYEXP("size"), size);
+    bson_append_time_t(&setoninsert, KEYEXP("created"), now);
+    bson_append_document_end(&doc, &setoninsert);
+
+    res = mongoc_collection_update(coll,
+        MONGOC_UPDATE_UPSERT,
+        &cond,
+        &doc,
+        NULL, // write concern
+        &dberr);
     bson_destroy(&doc);
-    bson_destroy(&cond);
+    bson_destroy(&cond);    
 
-    if(res != MONGO_OK) {
-        fprintf(stderr, "Error committing block %s\n", conn->lasterrstr);
+    if(!res) {
+        logit(ERROR, "Error commiting block: %s", dberr.message);
         return -EIO;
     }
 
@@ -322,9 +344,10 @@ end:
 }
 
 int do_trunc(struct inode * e, off_t off) {
-    bson cond;
+    bson_t cond;
+    bson_error_t dberr;
     int res;
-    mongo * conn = get_conn();
+    mongoc_collection_t * coll = get_coll(COLL_EXTENTS);
 
     if(off > e->size) {
         e->size = off;
@@ -341,18 +364,24 @@ int do_trunc(struct inode * e, off_t off) {
     pthread_mutex_unlock(&e->wr_lock);
 
     bson_init(&cond);
-    bson_append_oid(&cond, "inode", &e->oid);
+    bson_append_oid(&cond, KEYEXP("inode"), &e->oid);
     if(off > 0) {
-        bson_append_start_object(&cond, "start");
-        bson_append_long(&cond, "$gte", off);
-        bson_append_finish_object(&cond);
+        bson_t start;
+        bson_append_document_begin(&cond, KEYEXP("start"), &start);
+        bson_append_int64(&start, KEYEXP("$gte"), off);
+        bson_append_document_end(&cond, &start);
     }
-    bson_finish(&cond);
 
-    res = mongo_remove(conn, extents_name, &cond, NULL);
+    res = mongoc_collection_delete(coll,
+        0, // flags,
+        &cond,
+        NULL, // write concern,
+        &dberr);
     bson_destroy(&cond);
-    if(res != 0) {
-        fprintf(stderr, "Error removing extents in do_truncate\n");
+    if(!res) {
+        char oidstr[25];
+        bson_oid_to_string(&e->oid, oidstr);
+        logit(ERROR, "Error removing extents for %s: %s", oidstr, dberr.message);
         return -EIO;
     }
 

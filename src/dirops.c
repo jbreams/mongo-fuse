@@ -2,7 +2,6 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <mongo.h>
 #include <stdlib.h>
 #include <search.h>
 #include <sys/stat.h>
@@ -11,9 +10,6 @@
 #include <limits.h>
 #include <time.h>
 
-extern const char * inodes_name;
-extern const char * dbname;
-extern const char * inodes_coll;
 extern char empty_hash[];
 
 struct readdir_data {
@@ -24,25 +20,38 @@ struct readdir_data {
 int read_dirents(const char * directory,
     int (*dirent_cb)(struct inode *e, void * p,
     const char * parent, size_t parentlen), void * p) {
-    bson query;
-    mongo_cursor curs;
     size_t pathlen = strlen(directory);
     char regexp[PATH_MAX + 10];
     int res;
-    mongo * conn = get_conn();
+    mongoc_collection_t * coll = get_coll(COLL_INODES);
+    bson_t query;
+    const bson_t *doc;
+    bson_error_t dberr;
+    mongoc_cursor_t * curs;
 
     sprintf(regexp, "^%s/[^/]+$", pathlen == 1 ? directory + 1 : directory);
     bson_init(&query);
-    bson_append_regex(&query, "dirents", regexp, "");
-    bson_finish(&query);
+    bson_append_regex(&query, KEYEXP("dirents"), regexp, "");
 
-    mongo_cursor_init(&curs, conn, inodes_name);
-    mongo_cursor_set_query(&curs, &query);
+    curs = mongoc_collection_find(coll,
+        MONGOC_QUERY_NONE,
+        0, // skip
+        0, // limit
+        0, // batch size
+        &query,
+        NULL, // fields
+        NULL); // read prefs
 
-    while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
+    bson_destroy(&query);
+    if(!curs) {
+        logit(ERROR, "Error getting cursor while reading directory entries");
+        return -EIO;
+    }
+
+    while(mongoc_cursor_next(curs, &doc)) {
         struct inode e;
         init_inode(&e);
-        res = read_inode(mongo_cursor_bson(&curs), &e);
+        res = read_inode(doc, &e);
         if(res != 0) {
             fprintf(stderr, "Error in read_inode\n");
             break;
@@ -53,13 +62,15 @@ int read_dirents(const char * directory,
         if(res != 0)
             break;
     }
-    bson_destroy(&query);
-    mongo_cursor_destroy(&curs);
 
-    if(curs.err != MONGO_CURSOR_EXHAUSTED) {
-        fprintf(stderr, "Error listing directory contents\n");
+    if(mongoc_cursor_error(curs, &dberr)) {
+        mongoc_cursor_destroy(curs);
+        logit(ERROR, "Error reading directory entries for %s: %s",
+            directory, dberr.message);
         return -EIO;
     }
+
+    mongoc_cursor_destroy(curs);
     return 0;
 }
 
@@ -174,22 +185,34 @@ int orphan_snapshot(struct inode *e, void * p,
 
 int mongo_rmdir(const char * path) {
     struct inode e;
+    bson_error_t dberr;
+    int64_t dres;
     int res;
-    double dres;
-    bson cond;
+    bson_t cond;
     char regexp[PATH_MAX + 25];
-    mongo * conn = get_conn();
+    mongoc_collection_t * coll = get_coll(COLL_INODES);
 
     if((res = inode_exists(path)) != 0)
         return res;
 
     sprintf(regexp, "^%s/[^/]+$", path);
     bson_init(&cond);
-    bson_append_regex(&cond, "dirents", regexp, "");
-    bson_finish(&cond);
+    bson_append_regex(&cond, KEYEXP("dirents"), regexp, "");
 
-    dres = mongo_count(conn, dbname, inodes_coll, &cond);
+    dres = mongoc_collection_count(coll,
+        0, // flags
+        &cond,
+        0, // skip
+        0, // limit
+        NULL, // write preferences
+        &dberr);
+
     bson_destroy(&cond);
+
+    if(dres == -1) {
+        logit(ERROR, "Error counting directory entries: %s", dberr.message);
+        return -EIO;
+    }
 
     if(dres > 1)
         return -ENOTEMPTY;
@@ -201,11 +224,22 @@ int mongo_rmdir(const char * path) {
 
         sprintf(regexp, "^%s/.snapshot/", path);
         bson_init(&cond);
-        bson_append_regex(&cond, "dirents", regexp, "");
-        bson_finish(&cond);
+        bson_append_regex(&cond, KEYEXP("dirents"), regexp, "");
 
-        dres = mongo_count(conn, dbname, inodes_coll, &cond);
+        dres = mongoc_collection_count(coll,
+            0, // flags
+            &cond,
+            0, // skip
+            0, // limit
+            NULL, // write preferences
+            &dberr);
+
         bson_destroy(&cond);
+
+        if(dres == -1) {
+            logit(ERROR, "Error counting directory entries: %s", dberr.message);
+            return -EIO;
+        }
 
         if(dres > 0) {
             res = orphan_snapshot(&e, (void*)path, NULL, 0);
@@ -217,15 +251,21 @@ int mongo_rmdir(const char * path) {
 
     sprintf(regexp, "^%s", path);
     bson_init(&cond);
-    bson_append_regex(&cond, "dirents", regexp, "");
-    bson_finish(&cond);
+    bson_append_regex(&cond, KEYEXP("dirents"), regexp, "");
 
-    res = mongo_remove(conn, inodes_name, &cond, NULL);
+    res = mongoc_collection_delete(coll,
+        0, // flags
+        &cond,
+        NULL, // write concern
+        &dberr);
+
     bson_destroy(&cond);
-    if(res != MONGO_OK) {
-        fprintf(stderr, "Error removing inode entry for %s\n", path);
+
+    if(!res) {
+        logit(ERROR, "Error removing directory entry %s: %s", path, dberr.message);
         return -EIO;
     }
+
     return 0;
 }
 
@@ -247,7 +287,7 @@ int create_snapshot(struct inode * e, void * p, const char * parent, size_t plen
     res = deserialize_extent(e, 0, e->size, &root);
     if(res != 0)
         return res;
-    bson_oid_gen(&newid);
+    bson_oid_init(&newid, NULL);
     memcpy(&e->oid, &newid, sizeof(bson_oid_t));
     res = serialize_extent(e, root);
     free(root);
@@ -293,27 +333,33 @@ int snapshot_dir(const char * path, size_t pathlen, mode_t mode) {
 }
 
 int mongo_rename(const char * path, const char * newpath) {
-    mongo * conn = get_conn();
-    bson query, doc;
+    mongoc_collection_t * coll = get_coll(COLL_INODES);
+    bson_t query, doc, setdoc;
+    bson_error_t dberr;
     int res;
 
     bson_init(&query);
-    bson_append_string(&query, "dirents", path);
-    bson_finish(&query);
+    bson_append_utf8(&query, KEYEXP("dirents"), path, strlen(path));
 
     bson_init(&doc);
-    bson_append_start_object(&doc, "$set");
-    bson_append_string(&doc, "dirents.$", newpath);
-    bson_append_finish_object(&doc);
-    bson_finish(&doc);
+    bson_append_document_begin(&doc, KEYEXP("$set"), &setdoc);
+    bson_append_utf8(&setdoc, KEYEXP("dirents.$"), newpath, strlen(path));
+    bson_append_document_end(&doc, &setdoc);
 
-    res = mongo_update(conn, inodes_name, &query, &doc,
-        MONGO_UPDATE_BASIC, NULL);
-    bson_destroy(&doc);
+    res = mongoc_collection_update(coll,
+        MONGOC_UPDATE_NONE,
+        &query,
+        &doc,
+        NULL, // write concern
+        &dberr);
+
     bson_destroy(&query);
+    bson_destroy(&doc);
 
-    if(res != MONGO_OK)
+    if(!res) {
+        logit(ERROR, "Error renaming inode %s: %s", path, dberr.message);
         return -EIO;
+    }
+
     return inode_exists(newpath);
 }
-

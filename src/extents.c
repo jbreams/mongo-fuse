@@ -3,19 +3,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <bson.h>
-#include <mongo.h>
 #include "mongo-fuse.h"
-
-extern char * extents_name;
 
 struct elist * init_elist() {
 	const size_t malloc_size = sizeof(struct elist) +
 		(sizeof(struct enode) * BLOCKS_PER_EXTENT);
-	struct elist * out = malloc(malloc_size);
+	struct elist * out = calloc(1, malloc_size);
 	if(!out)
 		return NULL;
-	memset(out, 0, sizeof(struct elist));
 	out->nslots = BLOCKS_PER_EXTENT;
 	return out;
 }
@@ -42,7 +37,7 @@ int ensure_elist(struct elist ** pout) {
 }
 
 int insert_hash(struct elist ** pout, off_t off, size_t len,
-	uint8_t hash[HASH_LEN]) {
+	const uint8_t hash[HASH_LEN]) {
 	int res, idx;
 	if((res = ensure_elist(pout)) != 0)
 		return res;
@@ -86,8 +81,9 @@ int enode_cmp(const void * ra, const void * rb) {
 }
 
 int serialize_extent(struct inode * e, struct elist * list) {
-	mongo * conn = get_conn();
-	bson doc, cond;
+	mongoc_collection_t * coll = get_coll(COLL_EXTENTS);
+	bson_t doc, cond;
+	bson_error_t dberr;
 	int res, idx, towrite = 0;
 
 	if(list->nnodes == 0)
@@ -96,70 +92,86 @@ int serialize_extent(struct inode * e, struct elist * list) {
 
 	for(idx = 0; idx < list->nnodes;) {
 		bson_oid_t docid;
+		bson_t blocklist, sub;
 		off_t last_end = 0;
 		struct enode * cur = &list->list[idx];
 		const off_t cur_start = cur->off;
 		int nhashes = 0;
 
-		bson_oid_gen(&docid);
+		bson_oid_init(&docid, NULL);
 		bson_init(&doc);
-		bson_append_oid(&doc, "_id", &docid);
-		bson_append_oid(&doc, "inode", &e->oid);
-		bson_append_long(&doc, "start", cur->off);
-		bson_append_start_array(&doc, "blocks");
+		bson_append_oid(&doc, KEYEXP("_id"), &docid);
+		bson_append_oid(&doc, KEYEXP("inode"), &e->oid);
+		bson_append_int64(&doc, KEYEXP("start"), cur->off);
+		bson_append_array_begin(&doc, KEYEXP("blocks"), &blocklist);
 		towrite = 0;
 		for(; idx < list->nnodes; idx++) {
+			bson_t blockentry;
 			cur = &list->list[idx];
-			char idxstr[10];
+			char idxbuf[10];
+			const char *idxstr;
 
 			if(last_end > 0 && cur->off != last_end)
 				break;
+
+			size_t idxlen = bson_uint32_to_string(
+				nhashes++, &idxstr, idxbuf, sizeof(idxbuf));
 			
-			bson_numstr(idxstr, nhashes++);
-			bson_append_start_object(&doc, idxstr);
+			bson_append_document_begin(&blocklist, idxstr, idxlen, &blockentry);
 			if(cur->empty)
-				bson_append_null(&doc, "hash");
+				bson_append_null(&blockentry, KEYEXP("hash"));
 			else
-				bson_append_binary(&doc, "hash", 0,
-					(const char*)cur->hash, HASH_LEN);
-			bson_append_int(&doc, "len", cur->len);
-			bson_append_finish_object(&doc);
+				bson_append_binary(&blockentry, KEYEXP("hash"), 0,
+					cur->hash, HASH_LEN);
+			bson_append_int32(&blockentry, KEYEXP("len"), cur->len);
+			bson_append_document_end(&blocklist, &blockentry);
 
 			last_end = cur->off + cur->len;
 			towrite++;
 		}
 		
-		bson_append_finish_array(&doc);
-		bson_append_long(&doc, "end", last_end);
-		bson_finish(&doc);
+		bson_append_array_end(&doc, &blocklist);
+		bson_append_int64(&doc, KEYEXP("end"), last_end);
 
-		res = mongo_insert(conn, extents_name, &doc, NULL);
+		res = mongoc_collection_insert(coll,
+			0, // flags
+			&doc,
+			NULL, // write concern
+			&dberr);
+
 		bson_destroy(&doc);
-		if(res != MONGO_OK) {
-			fprintf(stderr, "Error inserting extent\n");
+		
+		if(!res) {
+			logit(ERROR, "Error inserting extent: %s", dberr.message);
 			return -EIO;
 		}
 
+		// { 
+		//   _id: { $lt: ObjectId(this) }, 
+		//   start: { $gte: cur_start },
+		//   end: { $lte: last_end }
+	    // }
 		bson_init(&cond);
-		bson_append_oid(&cond, "inode", &e->oid);
-		bson_append_start_object(&cond, "start");
-		bson_append_long(&cond, "$gte", cur_start);
-		bson_append_finish_object(&cond);
-		bson_append_start_object(&cond, "end");
-		bson_append_long(&cond, "$lte", last_end);
-		bson_append_finish_object(&cond);
-		bson_append_start_object(&cond, "_id");
-		bson_append_oid(&cond, "$lt", &docid);
-		bson_append_finish_object(&cond);
-		bson_finish(&cond);
+		bson_append_document_begin(&cond, KEYEXP("_id"), &sub);
+		bson_append_oid(&cond, KEYEXP("$lt"), &docid);
+		bson_append_document_end(&cond, &sub);
+		bson_append_oid(&cond, KEYEXP("inode"), &e->oid);
+		bson_append_document_begin(&cond, KEYEXP("start"), &sub);
+		bson_append_int64(&sub, KEYEXP("$gte"), cur_start);
+		bson_append_document_end(&cond, &sub);
+		bson_append_document_begin(&cond, KEYEXP("end"), &sub);
+		bson_append_int64(&sub, KEYEXP("$lte"), last_end);
+		bson_append_document_end(&cond, &sub);
 
-		res = mongo_remove(conn, extents_name, &cond, NULL);
+		res = mongoc_collection_delete(coll,
+			0, // flags
+			&cond,
+			NULL, // write concern
+			&dberr);
 		bson_destroy(&cond);
 
-		if(res != MONGO_OK) {
-			fprintf(stderr, "Error cleaning up extents\n");
-			return -EIO;
-		}
+		if(!res)
+			logit(WARN, "Error cleaning up extent: %s", dberr.message);
 	}
 
 	list->nnodes = 0;
@@ -167,64 +179,89 @@ int serialize_extent(struct inode * e, struct elist * list) {
 }
 
 int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist ** pout) {
-	bson cond;
-	mongo * conn = get_conn();
-	mongo_cursor curs;
+	bson_t cond, query, orderby, sub;
+	const bson_t * curdoc;
+	mongoc_collection_t * coll = get_coll(COLL_EXTENTS);
+	mongoc_cursor_t * curs;
 	int res;
 	const off_t end = off + len;
 	struct elist * out = NULL;
 
 	/* start <= end && end >= start */
+	/* {
+	  $query: {
+	  	inode: docid
+	    start: { $lte: $(off + len) },
+	    end: { $gte: $(off) }
+	  },
+	  $orderby: {
+        start: 1,
+        _id: 1
+	  }
+	} */
 	bson_init(&cond);
-	bson_append_start_object(&cond, "$query");
-	bson_append_oid(&cond, "inode", &e->oid);
-	bson_append_start_object(&cond, "start");
-	bson_append_long(&cond, "$lte", off + len);
-	bson_append_finish_object(&cond);
-	bson_append_start_object(&cond, "end");
-	bson_append_long(&cond, "$gte", off);
-	bson_append_finish_object(&cond);
-	bson_append_finish_object(&cond);
-	bson_append_start_object(&cond, "$orderby");
-	bson_append_int(&cond, "start", 1);
-	bson_append_int(&cond, "_id", 1);
-	bson_append_finish_object(&cond);
-	bson_finish(&cond);
+	bson_append_document_begin(&cond, KEYEXP("$query"), &query);
+	bson_append_oid(&query, KEYEXP("inode"), &e->oid);
+	bson_append_document_begin(&query, KEYEXP("start"), &sub);
+	bson_append_int64(&sub, KEYEXP("$lte"), off + len);
+	bson_append_document_end(&query, &sub);
+	bson_append_document_begin(&query, KEYEXP("end"), &sub);
+	bson_append_int64(&sub, KEYEXP("$gte"), off);
+	bson_append_document_end(&query, &sub);
+	bson_append_document_end(&cond, &query);
+	bson_append_document_begin(&cond, KEYEXP("$orderby"), &orderby);
+	bson_append_int32(&orderby, KEYEXP("start"), 1);
+	bson_append_int32(&orderby, KEYEXP("_id"), 1);
+	bson_append_document_end(&cond, &orderby);
 
-	mongo_cursor_init(&curs, conn, extents_name);
-	mongo_cursor_set_query(&curs, &cond);
+	curs = mongoc_collection_find(coll,
+		MONGOC_QUERY_NONE,
+		0, // skip
+		0, // limit
+		0, // batch size
+		&cond,
+		NULL, // fields
+		NULL); // read prefs
 
-	while((res = mongo_cursor_next(&curs)) == MONGO_OK) {
-		const bson * curdoc = mongo_cursor_bson(&curs);
-		bson_iterator topi, i, sub;
-		bson_type bt;
+	while(mongoc_cursor_next(curs, &curdoc)) {
+		bson_iter_t topi, i, sub;
 		off_t curoff = 0;
 		const char * key;
-		bson_iterator_init(&topi, curdoc);
-		while(bson_iterator_next(&topi) != 0) {
-			key = bson_iterator_key(&topi);
+
+		bson_iter_init(&topi, curdoc);
+		while(bson_iter_next(&topi)) {
+			key = bson_iter_key(&topi);
 			if(strcmp(key, "blocks") == 0)
-				bson_iterator_subiterator(&topi, &i);
+				bson_iter_recurse(&topi, &i);
 			else if(strcmp(key, "start") == 0)
-				curoff = bson_iterator_long(&topi);
+				curoff = bson_iter_int64(&topi);
 		}
 
-		while(bson_iterator_next(&i) != 0) {
-			bson_iterator_subiterator(&i, &sub);
-			uint8_t * hash = NULL;
+		while(bson_iter_next(&i)) {
+			bson_iter_recurse(&i, &sub);
+			const uint8_t * hash;
 			int curlen = 0;
 			off_t curend;
 			int empty = 0;
-			while((bt = bson_iterator_next(&sub)) != 0) {
-				key = bson_iterator_key(&sub);
+
+			while(bson_iter_next(&sub)) {
+				key = bson_iter_key(&sub);
+				bson_type_t bt = bson_iter_type(&sub);
 				if(strcmp(key, "hash") == 0) {
-					if(bt == BSON_NULL)
+					if(bt == BSON_TYPE_NULL)
 						empty = 1;
-					else
-						hash = (uint8_t*)bson_iterator_bin_data(&sub);
+					else {
+						bson_subtype_t subtype;
+						uint32_t hashsize;
+						bson_iter_binary(
+							&sub,
+							&subtype,
+							&hashsize,
+							&hash);
+					}
 				}
 				else if(strcmp(key, "len") == 0)
-					curlen = bson_iterator_int(&sub);
+					curlen = bson_iter_int32(&sub);
 			}
 
 			curend = curoff + curlen;
@@ -244,7 +281,7 @@ int deserialize_extent(struct inode * e, off_t off, size_t len, struct elist ** 
 			curoff += curlen;
 		}
 	}
-	mongo_cursor_destroy(&curs);
+	mongoc_cursor_destroy(curs);
 	bson_destroy(&cond);
 	*pout = out;
 

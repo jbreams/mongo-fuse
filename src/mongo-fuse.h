@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <stdint.h>
-#include <mongo.h>
+#include <mongoc.h>
+#include <bson.h>
 #include <sys/types.h>
 #define FUSE_USE_VERSION 26
 
@@ -11,13 +12,23 @@ struct extent {
     char data[1];
 };
 
+#define KEYEXP(name) name, sizeof(name) - 1
+
 //#define BLOCKS_PER_EXTENT 2
 #define BLOCKS_PER_EXTENT 512
 #define MAX_BLOCK_SIZE 65536
 #define TREE_HEIGHT_LIMIT 64
 #define HASH_LEN 20
-#define LEFT 0
-#define RIGHT 1
+
+#define INFO 0
+#define WARN 1
+#define ERROR 2
+#define DEBUG 3
+
+#define COLL_INODES 0
+#define COLL_BLOCKS 1
+#define COLL_EXTENTS 2
+#define COLL_MAX 3
 
 struct dirent {
     struct dirent * next;
@@ -58,14 +69,15 @@ struct inode {
     time_t wr_age;
 };
 
-mongo * get_conn();
 void setup_threading();
 void teardown_threading();
 char * get_compress_buf();
 char * get_extent_buf();
+void logit(int level, const char * fmt, ...);
+mongoc_collection_t * get_coll(int coll);
 
 int insert_hash(struct elist ** list, off_t off,
-    size_t len, uint8_t hash[HASH_LEN]);
+    size_t len, const uint8_t hash[HASH_LEN]);
 int insert_empty(struct elist ** list, off_t off, size_t len);
 int deserialize_extent(struct inode * e, off_t off,
     size_t len, struct elist ** pout);
@@ -79,12 +91,8 @@ int get_cached_inode(const char * path, struct inode * out);
 int commit_inode(struct inode * e);
 int create_inode(const char * path, mode_t mode, const char * data);
 int check_access(struct inode * e, int amode);
-int read_inode(const bson * doc, struct inode * out);
+int read_inode(const bson_t * doc, struct inode * out);
 int inode_exists(const char * path);
-#if FUSE_VERSION > 28
-int lock_inode(struct inode * e, int writer, bson_date_t * locktime, int noblock);
-int unlock_inode(struct inode * e, int writer, bson_date_t locktime);
-#endif
 
 int do_trunc(struct inode * e, off_t off);
 
